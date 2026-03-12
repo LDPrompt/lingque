@@ -99,6 +99,10 @@ _TOOL_CATEGORIES = {
     "run_query": "query",
     "fetch_webpage": "web", "web_search": "web",
     "read_file": "file", "write_file": "file", "list_directory": "file",
+    "get_scheduler_status": "scheduler", "run_workflow": "workflow",
+    "list_workflows": "workflow", "get_workflow_status": "workflow",
+    "add_cron_task": "scheduler", "remove_cron_task": "scheduler",
+    "list_cron_tasks": "scheduler",
 }
 
 
@@ -254,13 +258,14 @@ class Agent:
         """
         rs = self._rs()
         
-        # 规则 2: 同一工具连续调用 2 次即警告（不管参数，不依赖窗口）
-        if rs.same_tool_streak >= 2:
+        # 规则 2: 同一工具连续调用 N 次（易循环工具 2 次，普通工具 3 次）
+        streak_threshold = 2 if rs.last_tool_name in LOOP_PRONE_TOOLS else 3
+        if rs.same_tool_streak >= streak_threshold:
             rs.stuck_type = "tool_repeat"
             return rs.last_tool_name, f"连续调用 {rs.last_tool_name} {rs.same_tool_streak} 次", "tool_repeat"
         
-        # 规则 4: 同类工具连续调用 4 次
-        if rs.same_category_streak >= 4:
+        # 规则 4: 同类工具连续调用 6 次（跳过 "other" 这个 catch-all 分类）
+        if rs.same_category_streak >= 6 and rs.last_tool_category != "other":
             cat = rs.last_tool_category
             rs.stuck_type = "category_loop"
             return rs.last_tool_name, f"连续调用 {cat} 类工具 {rs.same_category_streak} 次", "category_loop"
@@ -569,8 +574,8 @@ class Agent:
                 rs.stuck_intervention_count += 1
                 logger.warning(f"检测到死循环: {stuck_tool} - {stuck_reason} [类型: {stuck_type}] (第 {rs.stuck_intervention_count} 次干预)")
                 
-                if rs.stuck_intervention_count >= 2:
-                    # 第2次干预: 强制总结并通知用户，不再给机会
+                if rs.stuck_intervention_count >= 3:
+                    # 第3次干预: 强制总结并通知用户，不再给机会
                     final_response = await self._generate_summary(system_prompt, elapsed, loop_idx)
                     break
                 else:
@@ -688,9 +693,9 @@ class Agent:
                     logger.warning(f"length 压缩失败: {e}")
                 continue
 
-            # v3: 追踪连续无文字回复的轮次（独立于 stuck 干预）
+            # 追踪连续无文字回复的轮次（独立软警告，不影响 stuck_intervention_count）
             rs.loops_without_text += 1
-            if rs.loops_without_text >= 6 and rs.stuck_intervention_count < 2:
+            if rs.loops_without_text >= 8:
                 self.memory.add_message(Message(
                     role="system",
                     content=(
@@ -700,11 +705,7 @@ class Agent:
                     ),
                     _is_intervention=True,
                 ))
-                rs.stuck_intervention_count += 1
                 rs.loops_without_text = 0
-                rs.recent_tool_calls.clear()
-                rs.recent_tool_results.clear()
-                rs.recent_tool_args.clear()
 
             # 情况 B: LLM 请求调用工具
             tool_results = []

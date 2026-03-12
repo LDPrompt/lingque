@@ -10,11 +10,11 @@ steps:
         type: tool_call
         tool: list_directory
         args:
-          path: "."
+          path: "workspaces/"
 
       - id: read_memory
         type: tool_call
-        tool: read_memory
+        tool: read_memory_file
         args: {}
 
   - id: generate_report
