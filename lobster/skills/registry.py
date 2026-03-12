@@ -1,0 +1,207 @@
+"""
+🐦 技能注册中心
+所有 Skill 通过装饰器注册，Agent 通过 Registry 发现和调用技能
+"""
+
+import logging
+import inspect
+from typing import Any, Callable, Awaitable, Optional
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("lobster.skills")
+
+
+@dataclass
+class SkillResult:
+    """技能执行结果"""
+    success: bool
+    data: str = ""
+    error: str = ""
+
+    def __str__(self) -> str:
+        if self.success:
+            return self.data or "操作成功"
+        return f"错误: {self.error}"
+
+
+@dataclass
+class SkillDefinition:
+    """技能定义"""
+    name: str                       # 工具名, 如 "read_file"
+    description: str                # 描述，给 LLM 看的
+    parameters: dict                # JSON Schema 参数定义
+    handler: Callable[..., Awaitable[str]]  # 实际执行函数
+    risk_level: str = "low"         # low / medium / high
+    category: str = "general"       # 分类
+
+
+class SkillRegistry:
+    """技能注册中心 - 管理所有可用工具"""
+
+    def __init__(self):
+        self._skills: dict[str, SkillDefinition] = {}
+
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        risk_level: str = "low",
+        category: str = "general",
+    ):
+        """装饰器：注册一个技能
+
+        用法:
+            @registry.register(
+                name="read_file",
+                description="读取文件内容",
+                parameters={...},
+            )
+            async def read_file(path: str) -> str:
+                ...
+        """
+        def decorator(func: Callable[..., Awaitable[str]]):
+            skill = SkillDefinition(
+                name=name,
+                description=description,
+                parameters=parameters,
+                handler=func,
+                risk_level=risk_level,
+                category=category,
+            )
+            self._skills[name] = skill
+            logger.info(f"注册技能: {name} [{category}] (风险: {risk_level})")
+            return func
+        return decorator
+
+    def get(self, name: str) -> SkillDefinition | None:
+        return self._skills.get(name)
+
+    def list_all(self) -> list[SkillDefinition]:
+        return list(self._skills.values())
+
+    def to_tool_definitions(self) -> list[dict]:
+        """导出为 LLM tool calling 格式（全量）"""
+        return [
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "parameters": skill.parameters,
+            }
+            for skill in self._skills.values()
+        ]
+
+    # ---- 动态工具过滤 ----
+
+    _ALWAYS_CATEGORIES = {"general", "file", "code", "memory", "system", "self_improvement"}
+
+    _KEYWORD_TO_CATEGORY: dict[str, set[str]] = {
+        "browser": {"browser", "web", "search"},
+        "web":     {"browser", "web", "search"},
+        "网页":    {"browser", "web", "search"},
+        "浏览器":  {"browser", "web", "search"},
+        "搜索":    {"browser", "web", "search"},
+        "打开":    {"browser", "web", "search"},
+        "登录":    {"browser", "web", "search"},
+        "抖音":    {"browser", "web", "search"},
+        "邮件":    {"email", "calendar"},
+        "email":   {"email", "calendar"},
+        "日程":    {"email", "calendar"},
+        "日历":    {"email", "calendar"},
+        "提醒":    {"email", "calendar", "scheduler"},
+        "定时":    {"scheduler"},
+        "cron":    {"scheduler"},
+        "调度":    {"scheduler"},
+        "知识":    {"knowledge"},
+        "实体":    {"knowledge"},
+        "关系":    {"knowledge"},
+        "图谱":    {"knowledge"},
+        "工作流":  {"workflow"},
+        "workflow": {"workflow"},
+        "自动":    {"workflow", "ralph"},
+        "后台":    {"ralph", "scheduler"},
+        "mcp":     {"mcp"},
+        "服务":    {"mcp"},
+        "飞书":    {"feishu", "feishu_group", "feishu_docs"},
+        "群":      {"feishu_group"},
+        "文档":    {"feishu_docs", "file"},
+        "技能市场": {"skill_market"},
+        "安装技能": {"skill_market"},
+        "生成技能": {"skill_generator"},
+        "插件":    {"plugin"},
+    }
+
+    _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow"}
+
+    def select_tools_for_task(self, user_message: str,
+                              recent_tool_names: list[str] | None = None) -> list[dict]:
+        """根据用户消息智能选择相关工具子集，大幅减少 token 开销"""
+        needed_cats: set[str] = set(self._ALWAYS_CATEGORIES)
+
+        matched_keyword_cats: set[str] = set()
+        msg_lower = user_message.lower()
+        for keyword, cats in self._KEYWORD_TO_CATEGORY.items():
+            if keyword in msg_lower:
+                matched_keyword_cats.update(cats)
+
+        if recent_tool_names:
+            for name in recent_tool_names:
+                skill = self._skills.get(name)
+                if skill:
+                    needed_cats.add(skill.category)
+
+        if len(matched_keyword_cats) <= 2:
+            needed_cats.update(self._FALLBACK_CATEGORIES)
+        needed_cats.update(matched_keyword_cats)
+
+        selected = []
+        for skill in self._skills.values():
+            if skill.category in needed_cats:
+                selected.append({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "parameters": skill.parameters,
+                })
+
+        logger.info(f"工具过滤: {len(self._skills)} → {len(selected)} "
+                    f"(类别: {sorted(needed_cats)})")
+        return selected
+
+    MAX_RESULT_CHARS = 16000
+
+    async def execute_raw(self, name: str, arguments: dict[str, Any]) -> SkillResult:
+        """执行技能，返回结构化 SkillResult（推荐工作流引擎使用）"""
+        skill = self._skills.get(name)
+        if not skill:
+            return SkillResult(success=False, error=f"未知技能 '{name}'")
+
+        try:
+            logger.info(f"执行技能: {name}({arguments})")
+            result = await skill.handler(**arguments)
+            if not isinstance(result, SkillResult):
+                result = SkillResult(success=True, data=str(result))
+            logger.info(f"技能 {name} 执行完成")
+            return result
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.error(f"技能 {name} 执行失败: {error_msg}")
+            return SkillResult(success=False, error=error_msg)
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        """执行技能，返回字符串（兼容旧调用方）"""
+        result = await self.execute_raw(name, arguments)
+        result_str = str(result)
+        if len(result_str) > self.MAX_RESULT_CHARS:
+            truncated = result_str[:self.MAX_RESULT_CHARS]
+            logger.warning(
+                f"技能 {name} 结果过长 ({len(result_str)} 字符)，已截断到 {self.MAX_RESULT_CHARS}"
+            )
+            result_str = truncated + f"\n\n... [结果已截断，原始长度 {len(result_str)} 字符]"
+        return result_str
+
+
+# 全局技能注册中心
+registry = SkillRegistry()
+
+# 便捷别名，允许 from .registry import register
+register = registry.register

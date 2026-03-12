@@ -1,0 +1,63 @@
+name: deploy_check
+description: "部署前检查工作流 - 检查服务状态、执行健康检查、需人工审批后执行部署"
+version: "1.0"
+
+inputs:
+  service_name:
+    type: string
+    description: "服务名称"
+  deploy_command:
+    type: string
+    description: "部署命令"
+
+steps:
+  - id: health_check
+    type: tool_call
+    tool: run_command
+    args:
+      command: "echo '检查服务 ${inputs.service_name} 状态...'"
+    on_error: continue
+
+  - id: analyze_status
+    type: llm
+    prompt: |
+      服务 ${inputs.service_name} 的健康检查结果：
+      ${health_check.output}
+
+      请分析：
+      1. 服务当前状态是否正常
+      2. 是否可以安全执行部署
+      3. 部署前需要注意的事项
+
+  - id: approval_gate
+    type: approval
+    prompt: |
+      准备部署 ${inputs.service_name}
+
+      健康检查分析：
+      ${analyze_status.output}
+
+      部署命令: ${inputs.deploy_command}
+    timeout: 1800
+
+  - id: execute_deploy
+    type: tool_call
+    tool: run_command
+    args:
+      command: "${inputs.deploy_command}"
+
+  - id: verify
+    type: tool_call
+    tool: run_command
+    args:
+      command: "echo '部署后验证 ${inputs.service_name}...'"
+    on_error: continue
+
+  - id: notify_result
+    type: notify
+    message: |
+      🚀 **部署完成: ${inputs.service_name}**
+
+      部署命令: ${inputs.deploy_command}
+      部署输出: ${execute_deploy.output}
+      验证结果: ${verify.output}

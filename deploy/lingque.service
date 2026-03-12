@@ -1,0 +1,52 @@
+# /etc/systemd/system/lingque.service
+# 灵雀 LingQue 守护进程配置
+#
+# 安装方法:
+#   1. 修改下面的路径和用户名
+#   2. sudo cp deploy/lingque.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable lingque    # 开机自启
+#   5. sudo systemctl start lingque     # 立即启动
+#
+# 管理命令:
+#   sudo systemctl status lingque       # 查看状态
+#   sudo systemctl restart lingque      # 重启
+#   sudo journalctl -u lingque -f       # 查看实时日志
+
+[Unit]
+Description=LingQue AI Agent - 灵雀私人助手
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lingque
+Group=lingque
+
+# ⚠️ 修改为你的实际路径
+WorkingDirectory=/home/lingque/lingque
+ExecStart=/usr/bin/python3 -m lobster.main
+
+# 环境变量 (也可以用 EnvironmentFile 指向 .env)
+EnvironmentFile=/home/lingque/lingque/.env
+
+# 自动重启
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/lingque/lingque/memory /home/lingque/lingque/workspaces
+PrivateTmp=true
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lingque
+
+[Install]
+WantedBy=multi-user.target

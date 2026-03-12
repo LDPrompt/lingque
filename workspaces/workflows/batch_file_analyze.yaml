@@ -1,0 +1,57 @@
+name: batch_file_analyze
+description: "批量文件分析 - 循环读取多个文件，LLM 逐一分析，最后汇总"
+version: "1.0"
+
+inputs:
+  files:
+    type: string
+    description: "要分析的文件路径列表，逗号分隔"
+  task:
+    type: string
+    description: "分析任务描述"
+
+steps:
+  - id: loop_files
+    type: loop
+    over: "${inputs.files}"
+    loop_var: current_file
+    steps:
+      - id: read_it
+        type: tool_call
+        tool: read_file
+        args:
+          path: "${current_file}"
+        on_error: continue
+
+      - id: analyze_it
+        type: llm
+        prompt: |
+          文件: ${current_file}
+          任务: ${inputs.task}
+
+          内容:
+          ${read_it.output}
+
+          请完成分析任务，简洁输出结果。
+        on_error: continue
+
+  - id: summary
+    type: llm
+    prompt: |
+      以下是对多个文件的分析结果，请做一个整体汇总：
+
+      任务: ${inputs.task}
+      文件列表: ${inputs.files}
+
+      请给出：
+      1. 整体分析结论
+      2. 各文件要点
+      3. 建议和下一步行动
+
+  - id: send_summary
+    type: notify
+    message: |
+      📊 **批量文件分析完成**
+      任务: ${inputs.task}
+
+      ${summary.output}

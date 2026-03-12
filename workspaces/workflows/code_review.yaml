@@ -1,0 +1,45 @@
+name: code_review
+description: "代码审查工作流 - 读取文件、LLM 分析、生成审查报告"
+version: "1.0"
+
+inputs:
+  file_path:
+    type: string
+    description: "要审查的代码文件路径"
+
+steps:
+  - id: read_code
+    type: tool_call
+    tool: read_file
+    args:
+      path: "${inputs.file_path}"
+
+  - id: check_read
+    type: condition
+    if: "${read_code.success} == true"
+    then:
+      - id: analyze
+        type: llm
+        prompt: |
+          请对以下代码进行专业审查，从以下维度分析：
+          1. 代码质量和可读性
+          2. 潜在 Bug 和安全风险
+          3. 性能优化建议
+          4. 最佳实践改进点
+
+          代码内容：
+          ${read_code.output}
+
+          请用中文输出结构化的审查报告。
+    else:
+      - id: read_failed
+        type: notify
+        message: "❌ 无法读取文件: ${inputs.file_path}"
+
+  - id: report
+    type: notify
+    message: |
+      📝 **代码审查报告**
+      文件: ${inputs.file_path}
+
+      ${analyze.output}

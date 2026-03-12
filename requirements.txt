@@ -1,0 +1,48 @@
+# LLM Providers
+anthropic>=0.40.0
+openai>=2.26.0
+
+# 飞书 SDK
+lark-oapi>=1.4.0
+
+# 钉钉 SDK
+alibabacloud-dingtalk>=2.0.0
+
+# Web 浏览
+httpx>=0.27.0
+beautifulsoup4>=4.12.0
+
+# 异步框架
+asyncio-mqtt>=0.16.0
+aiohttp>=3.9.0
+uvicorn>=0.30.0
+fastapi>=0.115.0
+
+# 工具
+python-dotenv>=1.0.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+rich>=13.9.0          # 终端美化
+pyyaml>=6.0           # P4: 工作流 YAML 解析
+croniter>=3.0.0       # P2: 定时任务
+
+# ==================== P3: 记忆增强 ====================
+# 向量数据库（语义搜索）
+chromadb>=0.5.0
+pysqlite3-binary>=0.5.0  # 系统 sqlite3 < 3.35.0 时自动替换
+numpy<2.0
+
+# 向量嵌入模型（多语言支持）
+sentence-transformers>=3.0.0
+
+# 精确 Token 计数（可选，未安装时降级为字符估算）
+tiktoken>=0.7.0
+
+# ==================== P3: 安全沙箱 ====================
+# Docker 容器控制
+docker>=7.0.0
+
+# ==================== P3: 浏览器自动化 ====================
+# Playwright (安装后需运行: playwright install chromium)
+# 需要 >=1.49.0 以支持 aria_snapshot()
+playwright>=1.49.0

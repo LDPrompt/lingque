@@ -1,0 +1,56 @@
+# ===== 环境变量 & 密钥（绝不可提交！）=====
+.env
+server.env
+*.env
+!.env.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 运行时数据（包含用户隐私）=====
+/memory/
+workspaces/cookies/
+workspaces/screenshots/
+downloads/
+logs/
+*.log
+
+# ===== 学习引擎数据 =====
+.learnings/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Docker =====
+docker-compose.override.yml
+
+# ===== 其他 =====
+*.bak
+*.tmp
+*.cache
+htmlcov/
+.coverage
+.pytest_cache/

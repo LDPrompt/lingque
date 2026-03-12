@@ -1,0 +1,41 @@
+name: daily_report
+description: "每日工作报告生成 - 汇总当天文件变更、记忆摘要，生成日报"
+version: "1.0"
+
+steps:
+  - id: gather_info
+    type: parallel
+    steps:
+      - id: list_workspace
+        type: tool_call
+        tool: list_directory
+        args:
+          path: "."
+
+      - id: read_memory
+        type: tool_call
+        tool: read_memory
+        args: {}
+
+  - id: generate_report
+    type: llm
+    prompt: |
+      请根据以下信息生成一份简洁的每日工作报告：
+
+      ## 工作目录文件：
+      ${list_workspace.output}
+
+      ## 记忆摘要：
+      ${read_memory.output}
+
+      请生成结构化的日报，包含：
+      1. 今日完成的工作
+      2. 遇到的问题
+      3. 明日计划建议
+
+  - id: send_report
+    type: notify
+    message: |
+      📊 **每日工作报告**
+
+      ${generate_report.output}

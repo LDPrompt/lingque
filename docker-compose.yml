@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  lingque:
+    build: .
+    container_name: lingque
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      # 持久化数据
+      - ./memory:/data/memory
+      - ./workspaces:/data/workspaces
+      # 如果你需要让灵雀操作宿主机文件, 把目录挂载进来
+      # - /home/yourname/documents:/mnt/documents:ro   # 只读
+      # - /home/yourname/projects:/mnt/projects         # 读写
+    env_file:
+      - .env
+    environment:
+      - MEMORY_DIR=/data/memory
+      - WORKSPACE_DIR=/data/workspaces
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
