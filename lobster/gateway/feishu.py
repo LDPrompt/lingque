@@ -831,72 +831,28 @@ class FeishuChannel(BaseChannel):
 
     @staticmethod
     def _to_feishu_md(text: str) -> str:
-        """将标准 Markdown 转换为飞书 lark_md 兼容格式
+        """将标准 Markdown 转换为飞书卡片 markdown 兼容格式
 
-        飞书卡片 markdown 不支持:
-        - # 标题 → 转为 **加粗**
-        - | 表格 → 转为列表格式
-        - --- 分隔线 → 转为空行
+        飞书卡片 markdown 元素支持表格，保留原始表格格式。
+        仅转换飞书不支持的语法:
+        - # 标题 → **加粗**
+        - --- 分隔线 → 空行
         """
         import re
         lines = text.split('\n')
         result = []
-        i = 0
 
-        while i < len(lines):
-            line = lines[i]
-
-            # # 标题 → **加粗**
+        for line in lines:
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
-                title_text = header_match.group(2).strip()
-                result.append(f'**{title_text}**')
-                i += 1
+                result.append(f'**{header_match.group(2).strip()}**')
                 continue
 
-            # 检测表格: 当前行有 |，下一行是分隔行 |---|---|
-            if ('|' in line and i + 1 < len(lines)
-                    and re.match(r'^[\s|:\-]+$', lines[i + 1])
-                    and '|' in lines[i + 1]):
-                headers = [c.strip() for c in line.strip().strip('|').split('|')]
-                j = i + 2
-                while j < len(lines) and '|' in lines[j] and lines[j].strip():
-                    row = lines[j]
-                    if re.match(r'^[\s|:\-]+$', row):
-                        j += 1
-                        continue
-                    cells = [c.strip() for c in row.strip().strip('|').split('|')]
-                    if len(headers) >= 2 and len(cells) >= 2:
-                        label = cells[0] if cells[0] else ""
-                        pairs = []
-                        for hi in range(1, len(cells)):
-                            h = headers[hi] if hi < len(headers) else ""
-                            c = cells[hi] if hi < len(cells) else ""
-                            if h and c:
-                                pairs.append(f"{h}: {c}")
-                            elif c:
-                                pairs.append(c)
-                        line_text = ' / '.join(pairs)
-                        if label:
-                            result.append(f'- **{label}**  {line_text}')
-                        else:
-                            result.append(f'- {line_text}')
-                    else:
-                        parts = [c for c in cells if c]
-                        if parts:
-                            result.append('- ' + ' | '.join(parts))
-                    j += 1
-                i = j
-                continue
-
-            # --- 分隔线 → 空行
             if re.match(r'^-{3,}$', line.strip()):
                 result.append('')
-                i += 1
                 continue
 
             result.append(line)
-            i += 1
 
         return '\n'.join(result)
 
@@ -919,15 +875,20 @@ class FeishuChannel(BaseChannel):
         content = self._to_feishu_md(content)
 
         elements = []
-        for chunk in self._split_content(content, 2000):
-            elements.append({"tag": "markdown", "content": chunk})
+        sections = self._split_by_sections(content)
+        for i, section in enumerate(sections):
+            for chunk in self._split_content(section, 2000):
+                elements.append({"tag": "markdown", "content": chunk})
+            if i < len(sections) - 1:
+                elements.append({"tag": "hr"})
         if actions:
             elements.append({"tag": "hr"})
             elements.append({"tag": "action", "actions": actions})
 
+        theme = self._pick_header_theme(title)
         card = {
             "header": {
-                "template": "blue",
+                "template": theme,
                 "title": {"tag": "plain_text", "content": title},
             },
             "elements": elements,
@@ -1821,6 +1782,46 @@ class FeishuChannel(BaseChannel):
             retry_delay = min(retry_delay * 2, 30)
 
     # ==================== 工具方法 ====================
+
+    @staticmethod
+    def _split_by_sections(content: str) -> list[str]:
+        """按逻辑段落拆分内容（以加粗标题行或连续空行为分界）"""
+        import re
+        lines = content.split('\n')
+        sections = []
+        current = []
+
+        for line in lines:
+            is_section_header = bool(re.match(r'^\*\*[^*]+\*\*\s*$', line.strip()))
+            if is_section_header and current:
+                text = '\n'.join(current).strip()
+                if text:
+                    sections.append(text)
+                current = [line]
+            else:
+                current.append(line)
+
+        if current:
+            text = '\n'.join(current).strip()
+            if text:
+                sections.append(text)
+
+        if len(sections) <= 1:
+            return [content.strip()]
+        return sections
+
+    @staticmethod
+    def _pick_header_theme(title: str) -> str:
+        """根据标题选择卡片头主题色"""
+        if any(k in title for k in ["错误", "失败", "超时"]):
+            return "red"
+        if any(k in title for k in ["成功", "完成", "已切换"]):
+            return "green"
+        if any(k in title for k in ["提醒", "通知", "警告"]):
+            return "orange"
+        if any(k in title for k in ["状态", "模型", "管理"]):
+            return "indigo"
+        return "blue"
 
     def _split_content(self, content: str, max_len: int = 2000) -> list[str]:
         if len(content) <= max_len:

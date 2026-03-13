@@ -71,46 +71,17 @@ class PluginLoader:
         loader = PluginLoader(plugins_dir="./plugins", registry=registry)
         loader.scan()           # 首次扫描加载
         loader.hot_reload()     # 检查变更并重载
-
-    安全：
-        enabled=False 时不加载任何插件（默认关闭自动加载）
-        allowlist 限制可加载的插件名称
     """
 
-    def __init__(
-        self,
-        plugins_dir: str,
-        registry,
-        enabled: bool = None,
-        allowlist: list[str] = None,
-    ):
+    def __init__(self, plugins_dir: str, registry):
         self.plugins_dir = Path(plugins_dir).resolve()
         self.registry = registry
         self._plugins: dict[str, PluginInfo] = {}
         self._watching = False
         self._watch_task = None
 
-        if enabled is None:
-            enabled = os.environ.get("PLUGIN_LOADER_ENABLED", "false").lower() in ("true", "1", "yes")
-        self.enabled = enabled
-
-        if allowlist is None:
-            raw = os.environ.get("PLUGIN_ALLOWLIST", "")
-            self.allowlist = [n.strip() for n in raw.split(",") if n.strip()] if raw else None
-        else:
-            self.allowlist = allowlist
-
-    def _is_allowed(self, name: str) -> bool:
-        """检查插件名是否在允许列表内"""
-        if self.allowlist is None:
-            return True
-        return name in self.allowlist
-
     def scan(self) -> list[str]:
         """扫描并加载所有插件，返回加载的插件名列表"""
-        if not self.enabled:
-            logger.info("🔌 插件加载器已禁用 (设置 PLUGIN_LOADER_ENABLED=true 启用)")
-            return []
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         loaded = []
 
@@ -120,17 +91,11 @@ class PluginLoader:
 
             if item.is_file() and item.suffix == ".py":
                 name = item.stem
-                if not self._is_allowed(name):
-                    logger.info(f"🔌 插件 {name} 不在允许列表中，已跳过")
-                    continue
                 if self._load_plugin(name, item):
                     loaded.append(name)
 
             elif item.is_dir() and (item / "__init__.py").exists():
                 name = item.name
-                if not self._is_allowed(name):
-                    logger.info(f"🔌 插件 {name} 不在允许列表中，已跳过")
-                    continue
                 entry = item / "plugin.py" if (item / "plugin.py").exists() else item / "__init__.py"
                 if self._load_plugin(name, entry):
                     loaded.append(name)
@@ -188,8 +153,6 @@ class PluginLoader:
 
     def hot_reload(self) -> list[str]:
         """检查文件变更并热重载"""
-        if not self.enabled:
-            return []
         reloaded = []
 
         for name, info in list(self._plugins.items()):
@@ -210,7 +173,7 @@ class PluginLoader:
             if item.name.startswith("_") or item.name.startswith("."):
                 continue
             name = item.stem if item.is_file() else item.name
-            if name not in self._plugins and self._is_allowed(name):
+            if name not in self._plugins:
                 if item.is_file() and item.suffix == ".py":
                     if self._load_plugin(name, item):
                         reloaded.append(name)

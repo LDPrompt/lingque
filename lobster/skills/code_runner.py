@@ -77,7 +77,8 @@ def _check_dangerous_patterns(command: str) -> str | None:
         parts = [p.strip() for p in cmd_lower.split("|")]
         shell_interpreters = ("bash", "sh", "zsh", "python", "python3", "perl", "ruby", "node")
         for i, part in enumerate(parts):
-            if i > 0 and part.split()[0] in shell_interpreters:
+            tokens = part.split()
+            if i > 0 and tokens and tokens[0] in shell_interpreters:
                 return "安全限制: 拒绝通过管道将数据传给脚本解释器执行"
     return None
 

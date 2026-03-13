@@ -16,9 +16,13 @@ logger = logging.getLogger("lobster.llm")
 
 class OpenAIProvider(BaseLLMProvider):
 
-    def __init__(self, model: str, api_key: str, base_url: str | None = None, **kwargs):
+    def __init__(self, model: str, api_key: str, base_url: str | None = None,
+                 fixed_temperature: float | None = None,
+                 extra_body: dict | None = None, **kwargs):
         super().__init__(model, api_key)
         self.base_url = base_url
+        self.fixed_temperature = fixed_temperature
+        self.extra_body = extra_body
         client_kwargs = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
@@ -54,7 +58,7 @@ class OpenAIProvider(BaseLLMProvider):
                     "tool_call_id": msg.tool_call_id,
                 })
             elif msg.role == "assistant" and msg.tool_calls:
-                api_messages.append({
+                assistant_msg = {
                     "role": "assistant",
                     "content": msg.content or None,
                     "tool_calls": [
@@ -68,7 +72,10 @@ class OpenAIProvider(BaseLLMProvider):
                         }
                         for tc in msg.tool_calls
                     ],
-                })
+                }
+                if msg.reasoning_content or self.extra_body:
+                    assistant_msg["reasoning_content"] = msg.reasoning_content or ""
+                api_messages.append(assistant_msg)
             elif msg.role == "user" and msg.images:
                 content_parts = []
                 if msg.content:
@@ -86,8 +93,11 @@ class OpenAIProvider(BaseLLMProvider):
             else:
                 api_messages.append({"role": msg.role, "content": msg.content})
 
-        # 自动选择 temperature
-        if temperature is None:
+        if self.fixed_temperature is not None:
+            temperature = self.fixed_temperature
+        elif self.extra_body:
+            temperature = None
+        elif temperature is None:
             if self.is_deepseek:
                 temperature = 0.0 if tools else 1.0
             else:
@@ -96,9 +106,15 @@ class OpenAIProvider(BaseLLMProvider):
         kwargs = {
             "model": self.model,
             "messages": api_messages,
-            "temperature": temperature,
             "max_tokens": 8192,
         }
+
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
+            logger.debug(f"extra_body 已注入: {self.extra_body}")
 
         # DeepSeek reasoner 不支持 tools
         if tools and not self.is_reasoner:
@@ -112,10 +128,7 @@ class OpenAIProvider(BaseLLMProvider):
 
         content = choice.message.content or ""
 
-        # 解析 DeepSeek reasoner 的思考过程
-        reasoning_content = ""
-        if self.is_reasoner:
-            reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
+        reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
 
         # 解析工具调用
         tool_calls = []

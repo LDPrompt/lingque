@@ -46,6 +46,7 @@ class LLMRouter:
         self.total_usage = {"input_tokens": 0, "output_tokens": 0}
         self.task_usage = {"input_tokens": 0, "output_tokens": 0}
         self._session_models: dict[str, str] = {}
+        self._custom_providers: list[str] = []
         agent_cfg = getattr(config, "agent", None)
         self._llm_timeout = getattr(agent_cfg, "llm_timeout", 120) if agent_cfg else 120
         self._init_providers()
@@ -78,6 +79,22 @@ class LLMRouter:
                 api_key=llm.doubao_api_key,
                 base_url=llm.doubao_base_url,
             )
+
+        for cp in llm.get_custom_providers():
+            name = cp["name"]
+            if name in self.providers:
+                logger.warning(f"自定义 provider {name} 与内置同名，跳过")
+                continue
+            self.providers[name] = OpenAIProvider(
+                model=cp["model"],
+                api_key=cp["api_key"],
+                base_url=cp["base_url"],
+                fixed_temperature=cp.get("fixed_temperature"),
+                extra_body=cp.get("extra_body"),
+            )
+            self._custom_providers.append(name)
+            extra_info = f", fixed_temp={cp.get('fixed_temperature')}, extra_body={cp.get('extra_body')}" if cp.get("fixed_temperature") or cp.get("extra_body") else ""
+            logger.info(f"已注册自定义 provider: {name} (model={cp['model']}, base_url={cp['base_url']}{extra_info})")
 
         if not self.providers:
             raise ValueError("至少需要配置一个 LLM Provider 的 API Key!")
@@ -117,6 +134,14 @@ class LLMRouter:
                 "description": MODEL_DISPLAY_NAMES.get(name, name),
                 "available": available,
             })
+        for name in self._custom_providers:
+            if name in self.providers:
+                result.append({
+                    "name": name,
+                    "model_id": self.providers[name].model,
+                    "description": f"{name} (自定义)",
+                    "available": True,
+                })
         return result
 
     async def chat(
@@ -142,9 +167,10 @@ class LLMRouter:
                     active = mm
                     break
 
-        chain = [active] + [
-            p for p in DEFAULT_FALLBACK_CHAIN if p != active
+        fallback = DEFAULT_FALLBACK_CHAIN + [
+            p for p in self._custom_providers if p not in DEFAULT_FALLBACK_CHAIN
         ]
+        chain = [active] + [p for p in fallback if p != active]
 
         last_error = None
         for provider_name in chain:

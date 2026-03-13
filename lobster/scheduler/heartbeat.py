@@ -210,7 +210,13 @@ async def check_paused_workflows() -> Optional[str]:
         overdue = []
         now = datetime.now()
         for run in paused:
-            created = datetime.fromisoformat(run.get("created_at", ""))
+            created_str = run.get("created_at", "")
+            if not created_str:
+                continue
+            try:
+                created = datetime.fromisoformat(created_str)
+            except (ValueError, TypeError):
+                continue
             if (now - created) > timedelta(hours=2):
                 overdue.append(f"{run['workflow_name']} (ID: {run['id']})")
 

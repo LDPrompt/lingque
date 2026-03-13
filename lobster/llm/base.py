@@ -37,6 +37,7 @@ class Message:
     tool_call_id: str = ""   # 工具调用 ID
     tool_calls: list[ToolCall] = field(default_factory=list)
     images: list[str] = field(default_factory=list)  # base64 编码的图片列表
+    reasoning_content: str = ""  # 思考过程 (Kimi k2.5 / DeepSeek reasoner)
     _is_intervention: bool = False
 
 

@@ -11,6 +11,7 @@
 import asyncio
 import contextvars
 import logging
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -125,7 +126,7 @@ class Agent:
         self,
         llm_router: LLMRouter,
         memory: Memory,
-        max_loops: int = 15,
+        max_loops: int = 25,
         require_confirmation: bool = True,
         agent_config=None,
     ):
@@ -779,6 +780,7 @@ class Agent:
                     role="assistant",
                     content=response.content,
                     tool_calls=response.tool_calls,
+                    reasoning_content=response.reasoning_content,
                 )
             )
             MAX_TOOL_RESULT_CHARS = 3000
@@ -830,8 +832,11 @@ class Agent:
                 role="user",
                 content=(
                     f"[系统] 你已经执行了 {steps} 个步骤 ({elapsed:.0f} 秒)。"
-                    "请总结目前的工作成果：完成了什么、还有什么没完成、"
-                    "如果用户想继续应该怎么做。不要再调用工具，直接回复。"
+                    "请总结目前的工作成果：\n"
+                    "1. 已完成的部分\n"
+                    "2. 尚未完成的部分\n"
+                    "3. 告诉用户说「继续」即可让你自动完成剩余步骤\n"
+                    "不要建议用户手动操作，不要再调用工具，直接回复。"
                 ),
             )
         )
@@ -937,11 +942,11 @@ class Agent:
         if not skill:
             return f"未知工具: {tool_call.name}"
 
-        # run_query (low) 不需要确认，run_command (high) 需要确认
         need_confirmation = (
             self.require_confirmation
             and self._confirm_callback
             and skill.risk_level == "high"
+            and self._is_destructive(tool_call)
         )
 
         if need_confirmation:
@@ -953,6 +958,17 @@ class Agent:
                 return f"[用户已取消] 操作被用户拒绝: {tool_call.name}"
 
         return await skill_registry.execute(tool_call.name, tool_call.arguments)
+
+    _DESTRUCTIVE_KEYWORDS = re.compile(
+        r'\b(rm|rmdir|del|unlink|shred|truncate)\b'
+    )
+
+    def _is_destructive(self, tool_call: ToolCall) -> bool:
+        """只有真正破坏性的操作才需要用户确认，普通系统命令直接放行"""
+        if tool_call.name == "run_command":
+            cmd = tool_call.arguments.get("command", "")
+            return bool(self._DESTRUCTIVE_KEYWORDS.search(cmd))
+        return True
 
     def _format_confirmation_desc(self, skill, tool_call: ToolCall) -> str:
         """格式化确认描述，让用户更容易理解"""

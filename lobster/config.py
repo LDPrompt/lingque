@@ -23,6 +23,54 @@ class LLMConfig(BaseSettings):
     doubao_base_url: str = Field("https://ark.cn-beijing.volces.com/api/v3", alias="DOUBAO_BASE_URL")
     doubao_model: str = Field("doubao-seed-2-0-pro-260215", alias="DOUBAO_MODEL")
 
+    _BUILTIN_PROVIDERS = {"anthropic", "openai", "deepseek", "doubao"}
+
+    def get_custom_providers(self) -> list[dict]:
+        """扫描 LLM_PROVIDER_* 环境变量，解析自定义 OpenAI 兼容 provider。
+        格式: LLM_PROVIDER_{NAME}=base_url|api_key|model[|temperature[|extra_json]]
+        temperature 可选，用于强制指定（如 Kimi k2.5 思考模式要求 temperature=1）
+        extra_json 可选，JSON 格式的额外请求参数（如禁用思考: {"thinking":{"type":"disabled"}}）
+        """
+        import os
+        import json
+        import logging
+        logger = logging.getLogger("lobster.config")
+        results = []
+        for key, value in os.environ.items():
+            if not key.startswith("LLM_PROVIDER_"):
+                continue
+            name = key[len("LLM_PROVIDER_"):].lower()
+            if not name or name in self._BUILTIN_PROVIDERS:
+                continue
+            parts = value.split("|", 4)
+            if len(parts) < 3:
+                logger.warning(
+                    f"自定义 provider {name} 格式错误（需要 base_url|api_key|model[|temperature[|extra_json]]）: {key}"
+                )
+                continue
+            base_url, api_key, model = [p.strip() for p in parts[:3]]
+            if not all([base_url, api_key, model]):
+                logger.warning(f"自定义 provider {name} 有空字段，跳过: {key}")
+                continue
+            entry = {
+                "name": name,
+                "base_url": base_url,
+                "api_key": api_key,
+                "model": model,
+            }
+            if len(parts) >= 4 and parts[3].strip():
+                try:
+                    entry["fixed_temperature"] = float(parts[3].strip())
+                except ValueError:
+                    logger.warning(f"自定义 provider {name} temperature 格式错误，忽略: {parts[3]}")
+            if len(parts) >= 5 and parts[4].strip():
+                try:
+                    entry["extra_body"] = json.loads(parts[4].strip())
+                except json.JSONDecodeError:
+                    logger.warning(f"自定义 provider {name} extra_json 格式错误，忽略: {parts[4]}")
+            results.append(entry)
+        return results
+
 
 class FeishuConfig(BaseSettings):
     model_config = _ENV_CONFIG
@@ -83,7 +131,7 @@ class AgentConfig(BaseSettings):
     # 默认工具执行超时（秒）
     tool_timeout: int = Field(120, alias="AGENT_TOOL_TIMEOUT")
     # 最大循环轮次
-    max_loops: int = Field(15, alias="AGENT_MAX_LOOPS")
+    max_loops: int = Field(25, alias="AGENT_MAX_LOOPS")
     # 上下文窗口：最大消息条数和 token 数
     max_context_messages: int = Field(80, alias="AGENT_MAX_CONTEXT_MESSAGES")
     max_context_tokens: int = Field(64000, alias="AGENT_MAX_CONTEXT_TOKENS")
@@ -127,7 +175,7 @@ class BrowserConfig(BaseSettings):
 class SecurityConfig(BaseSettings):
     model_config = _ENV_CONFIG
     require_confirmation: bool = Field(True, alias="REQUIRE_CONFIRMATION")
-    max_tool_loops: int = Field(15, alias="MAX_TOOL_LOOPS")
+    max_tool_loops: int = Field(25, alias="MAX_TOOL_LOOPS")
     allowed_paths: str = Field("", alias="ALLOWED_PATHS")
 
     def get_allowed_paths(self) -> list[str]:
