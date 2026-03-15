@@ -126,7 +126,7 @@ def count_messages_tokens(messages: list[Message]) -> int:
 
 
 class Memory:
-    """记忆管理器（支持多会话隔离 + 智能压缩）"""
+    """记忆管理器（支持多会话隔离 + 智能压缩 + 会话持久化）"""
 
     def __init__(self, memory_dir: Path, max_context_messages: int = 50,
                  max_context_tokens: int = 32000,
@@ -149,6 +149,10 @@ class Memory:
         # 待异步提取的会话消息（按 session_id 隔离，由 flush_session_memories 消费）
         self._pending_flush_messages: dict[str, list[Message]] = {}
 
+        # 会话持久化目录
+        self._session_dir = self.memory_dir / "sessions"
+        self._session_dir.mkdir(exist_ok=True)
+
         # 长期记忆文件
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.log_dir = self.memory_dir / "logs"
@@ -162,6 +166,9 @@ class Memory:
                 "## 重要信息\n\n(尚无记录)\n",
                 encoding="utf-8",
             )
+
+        # 启动时从磁盘恢复会话
+        self._load_sessions_from_disk()
 
     # ------ 多会话管理 ------
 
@@ -205,6 +212,7 @@ class Memory:
                 self._sessions[session_id] = []
                 self._pending_per_session[session_id] = set()
                 self._session_start_times[session_id] = now
+                self._delete_session_file(session_id)
 
         if session_id not in self._sessions:
             self._sessions[session_id] = []
@@ -248,10 +256,144 @@ class Memory:
 
         if stale_ids:
             logger.info(f"清理了 {len(stale_ids)} 个过期会话，剩余 {len(self._sessions)} 个")
+            for sid in stale_ids:
+                self._delete_session_file(sid)
+
+    # ------ 会话持久化 ------
+
+    @staticmethod
+    def _session_id_to_filename(session_id: str) -> str:
+        """把 session_id 转为安全文件名（替换冒号等特殊字符）"""
+        import re as _re
+        return _re.sub(r'[^a-zA-Z0-9_\-]', '_', session_id) + ".json"
+
+    def _message_to_dict(self, msg: Message) -> dict:
+        """Message 序列化为 dict（跳过 base64 图片和内部标记）"""
+        d: dict = {"role": msg.role, "content": msg.content or ""}
+        if msg.name:
+            d["name"] = msg.name
+        if msg.tool_call_id:
+            d["tool_call_id"] = msg.tool_call_id
+        if msg.tool_calls:
+            d["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                for tc in msg.tool_calls
+            ]
+        if msg.reasoning_content:
+            d["reasoning_content"] = msg.reasoning_content
+        return d
+
+    @staticmethod
+    def _dict_to_message(d: dict) -> Message:
+        """dict 反序列化为 Message"""
+        from ..llm.base import ToolCall as TC
+        tool_calls = []
+        for tc_data in d.get("tool_calls", []):
+            tool_calls.append(TC(
+                id=tc_data.get("id", ""),
+                name=tc_data.get("name", ""),
+                arguments=tc_data.get("arguments", {}),
+            ))
+        return Message(
+            role=d.get("role", "user"),
+            content=d.get("content", ""),
+            name=d.get("name", ""),
+            tool_call_id=d.get("tool_call_id", ""),
+            tool_calls=tool_calls,
+            reasoning_content=d.get("reasoning_content", ""),
+        )
+
+    def _persist_session(self, session_id: str):
+        """将指定会话保存到磁盘"""
+        msgs = self._sessions.get(session_id, [])
+        filepath = self._session_dir / self._session_id_to_filename(session_id)
+
+        if not msgs:
+            filepath.unlink(missing_ok=True)
+            return
+
+        data = {
+            "session_id": session_id,
+            "start_time": self._session_start_times.get(session_id, datetime.now()).isoformat(),
+            "last_active": self._session_last_active.get(session_id, datetime.now()).isoformat(),
+            "messages": [self._message_to_dict(m) for m in msgs],
+        }
+        try:
+            tmp = filepath.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=None), encoding="utf-8")
+            tmp.replace(filepath)
+        except Exception as e:
+            logger.warning(f"持久化会话 {session_id} 失败: {e}")
+
+    def _delete_session_file(self, session_id: str):
+        """删除指定会话的磁盘文件"""
+        filepath = self._session_dir / self._session_id_to_filename(session_id)
+        filepath.unlink(missing_ok=True)
+
+    def _load_sessions_from_disk(self):
+        """启动时从磁盘恢复所有会话"""
+        if not self._session_dir.exists():
+            return
+
+        loaded = 0
+        now = datetime.now()
+        for filepath in self._session_dir.glob("*.json"):
+            try:
+                data = json.loads(filepath.read_text(encoding="utf-8"))
+                session_id = data.get("session_id", "")
+                if not session_id:
+                    continue
+
+                # 跳过过期会话（超过 24 小时不活跃的不恢复）
+                last_active_str = data.get("last_active", "")
+                if last_active_str:
+                    try:
+                        last_active = datetime.fromisoformat(last_active_str)
+                        if (now - last_active).total_seconds() > 86400:
+                            filepath.unlink(missing_ok=True)
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+
+                messages = [self._dict_to_message(d) for d in data.get("messages", [])]
+                if not messages:
+                    filepath.unlink(missing_ok=True)
+                    continue
+
+                self._sessions[session_id] = messages
+
+                start_str = data.get("start_time", "")
+                try:
+                    self._session_start_times[session_id] = datetime.fromisoformat(start_str) if start_str else now
+                except (ValueError, TypeError):
+                    self._session_start_times[session_id] = now
+
+                try:
+                    self._session_last_active[session_id] = datetime.fromisoformat(last_active_str) if last_active_str else now
+                except (ValueError, TypeError):
+                    self._session_last_active[session_id] = now
+
+                self._pending_per_session[session_id] = set()
+                loaded += 1
+
+            except Exception as e:
+                logger.warning(f"恢复会话文件 {filepath.name} 失败: {e}")
+
+        if loaded:
+            logger.info(f"📂 从磁盘恢复了 {loaded} 个会话")
+
+    @staticmethod
+    def _sanitize_user_id(user_id: str) -> str:
+        """清理 user_id，防止路径穿越（仅保留字母、数字、下划线、连字符）"""
+        import re
+        safe = re.sub(r'[^a-zA-Z0-9_\-]', '_', user_id)
+        if not safe or safe in ('.', '..'):
+            safe = 'default'
+        return safe
 
     def set_user(self, user_id: str):
         """设置当前用户 ID，用于隔离长期记忆和日志"""
-        _ctx_user.set(user_id if user_id else "default")
+        _ctx_user.set(self._sanitize_user_id(user_id) if user_id else "default")
 
     def _get_user_memory_dir(self) -> Path:
         user_dir = self.memory_dir / "users" / self._current_user_id
@@ -326,6 +468,10 @@ class Memory:
 
         # 更新活跃时间
         self._session_last_active[self._current_session] = datetime.now()
+
+        # 持久化到磁盘（仅在用户消息或助手最终回复时保存，减少 IO）
+        if message.role in ("user", "assistant") and not message.tool_calls:
+            self._persist_session(self._current_session)
 
     # ------ 上下文获取（含配对验证）------
 
@@ -562,6 +708,7 @@ class Memory:
         self._save_session_summary(self._current_session)
         self.messages.clear()
         self._pending_tool_call_ids.clear()
+        self._delete_session_file(self._current_session)
 
     # ------ 智能压缩 ------
 
@@ -755,6 +902,7 @@ class Memory:
         except Exception:
             self.messages = intervention_msgs + to_keep
             logger.warning("LLM 摘要失败，退回简单截断")
+        self._persist_session(self._current_session)
 
     # ------ 长期记忆 ------
 

@@ -142,8 +142,8 @@ class WebhookHandler:
         """验证 Webhook 签名"""
         secret = self._secrets.get(source, "")
         if not secret:
-            logger.warning(f"Webhook 来源 '{source}' 未配置签名密钥，跳过验证")
-            return True
+            logger.warning(f"Webhook 来源 '{source}' 未配置签名密钥，拒绝请求（安全策略）")
+            return False
 
         if isinstance(body, dict):
             body = json.dumps(body, separators=(",", ":")).encode("utf-8")

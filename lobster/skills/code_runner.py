@@ -220,12 +220,31 @@ _SENSITIVE_PATH_KEYWORDS = frozenset({
 })
 
 
+_DUNDER_BLACKLIST = frozenset({
+    "__class__", "__bases__", "__subclasses__", "__mro__",
+    "__globals__", "__builtins__", "__code__", "__func__",
+    "__self__", "__dict__", "__init__", "__new__",
+    "__import__", "__loader__", "__spec__",
+})
+
+_DANGEROUS_STRING_PATTERNS = [
+    "__class__", "__bases__", "__subclasses__", "__globals__",
+    "__builtins__", "__mro__", "__import__",
+    "os.system", "os.popen", "os.exec",
+    "open('/etc", "open(\"/etc", "open('C:\\\\",
+]
+
+
 def _check_python_safety(code: str) -> str | None:
-    """AST + 字符串双层检查，防止绕过黑名单"""
+    """AST + 字符串 + dunder 链三层检查"""
     code_lower = code.lower()
     for kw in _SENSITIVE_PATH_KEYWORDS:
         if kw in code_lower:
             return f"安全限制: 代码尝试访问敏感路径 '{kw}'"
+
+    for pattern in _DANGEROUS_STRING_PATTERNS:
+        if pattern in code:
+            return f"安全限制: 代码包含危险模式 '{pattern}'"
 
     try:
         tree = ast.parse(code)
@@ -244,11 +263,20 @@ def _check_python_safety(code: str) -> str | None:
                 root = alias.name.split(".")[0]
                 if root in _FORBIDDEN_MODULES:
                     return f"安全限制: 禁止导入模块 '{alias.name}'"
+                if root == "os":
+                    return "安全限制: 禁止导入 os 模块"
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 root = node.module.split(".")[0]
                 if root in _FORBIDDEN_MODULES:
                     return f"安全限制: 禁止导入模块 '{node.module}'"
+                if root == "os":
+                    return "安全限制: 禁止导入 os 模块"
+
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _DUNDER_BLACKLIST:
+                return f"安全限制: 禁止访问内省属性 '{node.attr}'"
+
         elif isinstance(node, ast.Call):
             func = node.func
             name = None

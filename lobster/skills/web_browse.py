@@ -2,9 +2,47 @@
 🐦 技能: 网页浏览 & 信息搜集
 """
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from .registry import registry
+
+import logging
+_logger = logging.getLogger("lingque.skills.web_browse")
+
+
+def _is_safe_url(url: str) -> str | None:
+    """检查 URL 是否安全（防止 SSRF 攻击内网 / 云元数据）"""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "URL 格式无效"
+
+    if parsed.scheme not in ("http", "https"):
+        return f"不支持的协议: {parsed.scheme}（仅允许 http/https）"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return "URL 缺少主机名"
+
+    BLOCKED_HOSTS = {"localhost", "0.0.0.0", "metadata.google.internal"}
+    if hostname.lower() in BLOCKED_HOSTS:
+        return f"安全限制: 禁止访问 {hostname}"
+
+    try:
+        addrs = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return f"安全限制: {hostname} 解析到内网地址 {ip}，禁止访问"
+    except socket.gaierror:
+        pass
+    except Exception as e:
+        _logger.warning(f"URL 安全检查异常: {e}")
+
+    return None
 
 
 @registry.register(
@@ -27,6 +65,10 @@ from .registry import registry
 )
 async def fetch_webpage(url: str, max_length: int = 5000) -> str:
     try:
+        ssrf_err = _is_safe_url(url)
+        if ssrf_err:
+            return f"拒绝访问: {ssrf_err}"
+
         async with httpx.AsyncClient(
             timeout=15,
             follow_redirects=True,

@@ -9,6 +9,7 @@ import json
 import asyncio
 import contextvars
 import logging
+import re
 import uuid
 import time
 import threading
@@ -479,12 +480,9 @@ class FeishuChannel(BaseChannel):
         confirmed_raw = action_value.get("confirmed", False)
         confirmed = confirmed_raw in (True, "true", "True", "1")
         
-        # 宽松 token 验证: token 无效但 action_id 是我们等待的也放行
-        token_valid = (not self.verification_token) or (token == self.verification_token)
-        action_pending = action_id and action_id in self._pending_confirmations
-        
-        if not token_valid and not action_pending:
-            logger.debug(f"卡片回调跳过: token不匹配且无对应action")
+        # token 校验: 配置了 verification_token 时必须匹配
+        if self.verification_token and token != self.verification_token:
+            logger.warning(f"卡片回调 token 验证失败，拒绝请求")
             return web.Response(status=200, text="ok")
 
         # 唤醒等待确认的 Future
@@ -677,6 +675,9 @@ class FeishuChannel(BaseChannel):
         if text.startswith("/model"):
             await self._handle_model_command(text, session_id, chat_id)
             return
+        if text == "/reload":
+            await self._handle_reload_command(chat_id)
+            return
 
         # 群聊消息加发送者标识（让 Agent 区分不同用户）
         if chat_type == "group" and sender_id:
@@ -780,6 +781,84 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.warning(f"更新规划卡片失败: {e}")
 
+    async def _handle_reload_command(self, chat_id: str):
+        """热重载 .env 配置，无需重启服务"""
+        import os
+        from dotenv import load_dotenv
+        from ..config import Config, LLMConfig
+        from ..skills.file_ops import set_allowed_paths
+
+        reloaded = []
+        errors = []
+
+        try:
+            load_dotenv(override=True)
+
+            new_config = Config()
+
+            # 1. LLM 配置（API Key / 模型 / 自定义 Provider）
+            old_provider = self.agent.llm.primary
+            old_providers_count = len(self.agent.llm.providers)
+            self.agent.llm.config = new_config
+            self.agent.llm.providers.clear()
+            self.agent.llm._custom_providers.clear()
+            self.agent.llm.primary = new_config.llm.provider
+            self.agent.llm._init_providers()
+            new_providers = list(self.agent.llm.providers.keys())
+            reloaded.append(f"LLM: 主模型 **{new_config.llm.provider}**, "
+                          f"可用 {len(new_providers)} 个 ({', '.join(new_providers)})")
+
+            # 2. Agent 超时参数
+            agent_cfg = new_config.agent
+            self.agent.llm._llm_timeout = agent_cfg.llm_timeout
+            self.agent._task_timeout = agent_cfg.task_timeout
+            self.agent._tool_timeout = agent_cfg.tool_timeout
+            self.agent.max_loops = agent_cfg.max_loops
+            reloaded.append(f"Agent: 任务超时={agent_cfg.task_timeout}s, "
+                          f"LLM超时={agent_cfg.llm_timeout}s, 最大循环={agent_cfg.max_loops}")
+
+            # 3. 安全配置
+            allowed = new_config.security.get_allowed_paths()
+            if allowed:
+                set_allowed_paths(allowed)
+            else:
+                set_allowed_paths([str(new_config.workspace_dir.resolve())])
+            self.agent.require_confirmation = new_config.security.require_confirmation
+            reloaded.append(f"安全: 确认={new_config.security.require_confirmation}, "
+                          f"路径={len(allowed or [1])}个")
+
+            # 4. 飞书白名单
+            old_users = self.config.feishu.allowed_users
+            self.config = new_config
+            reloaded.append(f"飞书白名单: {'已更新' if new_config.feishu.allowed_users != old_users else '未变'}")
+
+            # 5. 日志级别
+            import logging
+            log_level = getattr(logging, new_config.log_level.upper(), logging.INFO)
+            logging.getLogger().setLevel(log_level)
+            reloaded.append(f"日志级别: {new_config.log_level}")
+
+        except Exception as e:
+            errors.append(f"重载异常: {e}")
+            logger.error(f"配置热重载失败: {e}", exc_info=True)
+
+        # 构建反馈消息
+        lines = ["**✅ 配置已热重载**\n"]
+        for item in reloaded:
+            lines.append(f"- {item}")
+
+        if errors:
+            lines.append("\n**⚠️ 部分重载失败:**")
+            for err in errors:
+                lines.append(f"- {err}")
+
+        lines.append("\n---")
+        lines.append("*以下配置修改需要重启才能生效:*")
+        lines.append("飞书 App ID/Secret、连接模式、通道类型、端口")
+
+        await self.send_card(chat_id, "🔄 配置热重载", "\n".join(lines))
+        logger.info(f"配置热重载完成: {len(reloaded)} 项成功, {len(errors)} 项失败")
+
     async def _handle_model_command(self, text: str, session_id: str, chat_id: str):
         """处理 /model 命令：查看、切换模型"""
         parts = text.strip().split()
@@ -831,30 +910,143 @@ class FeishuChannel(BaseChannel):
 
     @staticmethod
     def _to_feishu_md(text: str) -> str:
-        """将标准 Markdown 转换为飞书卡片 markdown 兼容格式
+        """将标准 Markdown 转换为飞书卡片 markdown 兼容格式（不处理表格）
 
-        飞书卡片 markdown 元素支持表格，保留原始表格格式。
-        仅转换飞书不支持的语法:
-        - # 标题 → **加粗**
-        - --- 分隔线 → 空行
+        表格由 _content_to_elements 单独处理为 v2 table 组件。
         """
-        import re
         lines = text.split('\n')
         result = []
-
         for line in lines:
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
                 result.append(f'**{header_match.group(2).strip()}**')
                 continue
-
             if re.match(r'^-{3,}$', line.strip()):
                 result.append('')
                 continue
-
             result.append(line)
-
         return '\n'.join(result)
+
+    @staticmethod
+    def _parse_md_table(lines: list[str], start: int) -> tuple[list[str], list[str], int]:
+        """解析 markdown 表格，返回 (headers, table_lines, end_index)"""
+        headers = [c.strip() for c in lines[start].strip().strip('|').split('|')]
+        headers = [h for h in headers if h]
+        table_lines = [lines[start], lines[start + 1]]
+        j = start + 2
+        while j < len(lines) and '|' in lines[j] and lines[j].strip():
+            table_lines.append(lines[j])
+            j += 1
+        return headers, table_lines, j
+
+    @staticmethod
+    def _md_table_to_v2_element(headers: list[str], table_lines: list[str]) -> dict:
+        """将 markdown 表格转为飞书 v2 card table 组件
+
+        根据官方文档: columns 用 name(key)+display_name, rows 用对象格式。
+        """
+        columns = []
+        for i, h in enumerate(headers):
+            columns.append({
+                "name": f"c{i}",
+                "display_name": h,
+                "data_type": "text",
+                "width": "auto",
+            })
+
+        rows = []
+        for row_line in table_lines[2:]:
+            if re.match(r'^[\s|:\-]+$', row_line):
+                continue
+            cells = [c.strip() for c in row_line.strip().strip('|').split('|')]
+            cells = [c for c in cells if c or len(cells) <= len(headers) + 2]
+            row = {}
+            for i in range(len(headers)):
+                row[f"c{i}"] = cells[i] if i < len(cells) else ""
+            rows.append(row)
+
+        return {
+            "tag": "table",
+            "page_size": max(len(rows), 1),
+            "columns": columns,
+            "rows": rows,
+        }
+
+    @staticmethod
+    def _md_table_to_bullets(headers: list[str], table_lines: list[str]) -> str:
+        """将 markdown 表格转为 bullet 列表（v1 降级方案）"""
+        result = []
+        for row_line in table_lines[2:]:
+            if re.match(r'^[\s|:\-]+$', row_line):
+                continue
+            cells = [c.strip() for c in row_line.strip().strip('|').split('|')]
+            cells = [c for c in cells if c or len(cells) <= len(headers) + 2]
+            if len(headers) == 2:
+                v0 = cells[0] if len(cells) > 0 else ""
+                v1 = cells[1] if len(cells) > 1 else ""
+                result.append(f"• **{v0}**  {v1}")
+            else:
+                parts = []
+                for i, h in enumerate(headers):
+                    c = cells[i] if i < len(cells) else ""
+                    if c:
+                        parts.append(f"**{h}**: {c}")
+                result.append(f"• {' | '.join(parts)}")
+        return '\n'.join(result)
+
+    def _content_to_elements(self, content: str, use_v2_table: bool = True
+                             ) -> tuple[list[dict], bool]:
+        """解析内容为飞书卡片元素列表
+
+        Returns: (elements, has_v2_tables)
+        """
+        lines = content.split('\n')
+        segments: list[tuple] = []
+        current_md: list[str] = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            if ('|' in line and i + 1 < len(lines)
+                    and re.match(r'^[\s|:\-]+$', lines[i + 1])
+                    and '|' in lines[i + 1]):
+                if current_md:
+                    segments.append(('md', '\n'.join(current_md)))
+                    current_md = []
+                headers, table_lines, j = self._parse_md_table(lines, i)
+                segments.append(('table', (headers, table_lines)))
+                i = j
+                continue
+            current_md.append(line)
+            i += 1
+
+        if current_md:
+            segments.append(('md', '\n'.join(current_md)))
+
+        elements: list[dict] = []
+        table_count = 0
+        has_v2_tables = False
+
+        for seg_type, seg_data in segments:
+            if seg_type == 'md':
+                md_text = self._to_feishu_md(seg_data)
+                sections = self._split_by_sections(md_text)
+                for si, section in enumerate(sections):
+                    for chunk in self._split_content(section, 2000):
+                        elements.append({"tag": "markdown", "content": chunk})
+                    if si < len(sections) - 1:
+                        elements.append({"tag": "hr"})
+            elif seg_type == 'table':
+                headers, table_lines = seg_data
+                if use_v2_table and table_count < 5:
+                    elements.append(self._md_table_to_v2_element(headers, table_lines))
+                    table_count += 1
+                    has_v2_tables = True
+                else:
+                    bullets = self._md_table_to_bullets(headers, table_lines)
+                    elements.append({"tag": "markdown", "content": bullets})
+
+        return elements, has_v2_tables
 
     async def send_card(self, chat_id: str, title: str, content: str,
                         actions: list | None = None, mention_user_id: str = "",
@@ -872,28 +1064,56 @@ class FeishuChannel(BaseChannel):
         elif mention_user_id:
             content = f"<at id={mention_user_id}></at>\n\n{content}"
 
-        content = self._to_feishu_md(content)
+        elements, has_v2_tables = self._content_to_elements(content, use_v2_table=True)
 
-        elements = []
-        sections = self._split_by_sections(content)
-        for i, section in enumerate(sections):
-            for chunk in self._split_content(section, 2000):
-                elements.append({"tag": "markdown", "content": chunk})
-            if i < len(sections) - 1:
-                elements.append({"tag": "hr"})
         if actions:
             elements.append({"tag": "hr"})
             elements.append({"tag": "action", "actions": actions})
 
         theme = self._pick_header_theme(title)
-        card = {
-            "header": {
-                "template": theme,
-                "title": {"tag": "plain_text", "content": title},
-            },
-            "elements": elements,
-        }
 
+        if has_v2_tables:
+            card = {
+                "schema": "2.0",
+                "header": {
+                    "template": theme,
+                    "title": {"tag": "plain_text", "content": title},
+                },
+                "body": {
+                    "elements": elements,
+                },
+            }
+        else:
+            card = {
+                "header": {
+                    "template": theme,
+                    "title": {"tag": "plain_text", "content": title},
+                },
+                "elements": elements,
+            }
+
+        ok = await self._post_card(chat_id, card)
+
+        if not ok and has_v2_tables:
+            logger.warning("v2 table 卡片发送失败，降级为 v1 bullet 列表")
+            elements_v1, _ = self._content_to_elements(content, use_v2_table=False)
+            if actions:
+                elements_v1.append({"tag": "hr"})
+                elements_v1.append({"tag": "action", "actions": actions})
+            card_v1 = {
+                "header": {
+                    "template": theme,
+                    "title": {"tag": "plain_text", "content": title},
+                },
+                "elements": elements_v1,
+            }
+            ok = await self._post_card(chat_id, card_v1)
+
+        if not ok:
+            await self._send_text(chat_id, self._to_feishu_md(content))
+
+    async def _post_card(self, chat_id: str, card: dict) -> bool:
+        """发送卡片消息，成功返回 True"""
         payload = {
             "receive_id": chat_id,
             "msg_type": "interactive",
@@ -903,7 +1123,6 @@ class FeishuChannel(BaseChannel):
             "Authorization": f"Bearer {self._tenant_access_token}",
             "Content-Type": "application/json; charset=utf-8",
         }
-
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -911,12 +1130,17 @@ class FeishuChannel(BaseChannel):
                     params={"receive_id_type": "chat_id"},
                     json=payload, headers=headers,
                 )
-                if resp.status_code != 200:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("code", 0) == 0:
+                        return True
+                    logger.error(f"卡片业务错误: code={data.get('code')} msg={data.get('msg')}")
+                else:
                     logger.error(f"卡片发送失败: {resp.status_code} {resp.text}")
-                    await self._send_text(chat_id, content)
+                return False
         except Exception as e:
-            logger.error(f"发送异常: {e}")
-            await self._send_text(chat_id, content)
+            logger.error(f"卡片发送异常: {e}")
+            return False
 
     async def _send_text(self, chat_id: str, content: str):
         from ..agent.memory import redact_secrets
@@ -1472,6 +1696,12 @@ class FeishuChannel(BaseChannel):
 
     # ==================== 按钮确认 ====================
 
+    _HIGH_RISK_RE = re.compile(
+        r'\b(rm|rmdir|del|unlink|shred|truncate|drop\s+|format\s)'
+        r'|memory_clear|清空',
+        re.IGNORECASE,
+    )
+
     async def _ask_confirmation_via_card(self, description: str) -> bool:
         chat_id = _active_chat_id.get()
         if not chat_id:
@@ -1482,13 +1712,22 @@ class FeishuChannel(BaseChannel):
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_confirmations[action_id] = future
 
-        # 确认卡片 (JSON 1.0 结构)
-        # config.update_multi = true 允许卡片被回调更新
+        is_high_risk = bool(self._HIGH_RISK_RE.search(description))
+
+        if is_high_risk:
+            header_template = "red"
+            header_title = "⚠️ 高风险操作"
+            warning_note = "🚨 该操作可能导致数据丢失且不可撤销，请仔细确认！"
+        else:
+            header_template = "orange"
+            header_title = "🔐 操作确认"
+            warning_note = "⏱️ 请在 60 秒内确认，超时将自动取消"
+
         card = {
             "config": {"update_multi": True},
             "header": {
-                "template": "orange",
-                "title": {"tag": "plain_text", "content": "🔐 操作确认"},
+                "template": header_template,
+                "title": {"tag": "plain_text", "content": header_title},
             },
             "elements": [
                 {
@@ -1502,7 +1741,7 @@ class FeishuChannel(BaseChannel):
                 {
                     "tag": "note",
                     "elements": [
-                        {"tag": "plain_text", "content": "⏱️ 请在 60 秒内确认，超时将自动取消"},
+                        {"tag": "plain_text", "content": warning_note},
                     ],
                 },
                 {
@@ -1845,9 +2084,4 @@ class FeishuChannel(BaseChannel):
             del self._processed_msg_ids[k]
 
     async def _health_check(self, request: web.Request) -> web.Response:
-        return web.json_response({
-            "status": "ok",
-            "service": "lingque-feishu",
-            "token_valid": time.time() < self._token_expire_time,
-            "pending_confirmations": len(self._pending_confirmations),
-        })
+        return web.json_response({"status": "ok"})

@@ -26,10 +26,24 @@ def set_memory_dir(memory_dir: Path):
 
 
 def _get_memory_file() -> Path:
-    """获取 MEMORY.md 的绝对路径"""
-    if _memory_dir:
-        return _memory_dir / "MEMORY.md"
-    return Path("./memory/MEMORY.md")
+    """获取当前用户的 MEMORY.md 路径（per-user 隔离）"""
+    from ..agent.memory import _ctx_user
+    base = _memory_dir or Path("./memory")
+    user_id = _ctx_user.get()
+    if user_id and user_id != "default":
+        user_dir = base / "users" / user_id
+        user_dir.mkdir(parents=True, exist_ok=True)
+        user_file = user_dir / "MEMORY.md"
+        if not user_file.exists():
+            user_file.write_text(
+                f"# 🐦 {user_id} 的记忆\n\n"
+                "> 这是该用户的专属长期记忆\n\n"
+                "## 用户偏好\n\n(尚无记录)\n\n"
+                "## 重要信息\n\n(尚无记录)\n",
+                encoding="utf-8",
+            )
+        return user_file
+    return base / "MEMORY.md"
 
 
 @register(

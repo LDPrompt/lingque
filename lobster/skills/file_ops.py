@@ -21,15 +21,27 @@ def set_allowed_paths(paths: list[str]):
 
 
 def _check_path(path: str) -> str:
-    """校验路径安全性，返回绝对路径"""
-    abs_path = os.path.abspath(path)
-    if _allowed_paths:
-        if not any(abs_path == ap or abs_path.startswith(ap + os.sep) for ap in _allowed_paths):
-            raise PermissionError(
-                f"安全限制: 不允许访问 {abs_path}\n"
-                f"允许的目录: {_allowed_paths}"
-            )
+    """校验路径安全性，返回绝对路径（resolve 消除符号链接和 ..）"""
+    abs_path = str(Path(path).resolve())
+    if not _allowed_paths:
+        raise PermissionError(
+            "安全限制: 未配置 ALLOWED_PATHS，拒绝所有文件操作"
+        )
+    if not any(abs_path == ap or abs_path.startswith(ap + os.sep) for ap in _allowed_paths):
+        raise PermissionError(
+            f"安全限制: 不允许访问 {abs_path}\n"
+            f"允许的目录: {_allowed_paths}"
+        )
     return abs_path
+
+
+def _check_resolved_path(file_path: Path, base_path: Path) -> bool:
+    """检查 glob 结果是否在允许的基目录内（防止 ../  穿越）"""
+    try:
+        file_path.resolve().relative_to(base_path.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 # ============================================================
@@ -123,8 +135,7 @@ async def list_directory(path: str, pattern: str = "*", recursive: bool = False)
     else:
         items = sorted(p.glob(pattern))
 
-    # 最多返回 200 个条目
-    items = items[:200]
+    items = [item for item in items if _check_resolved_path(item, p)][:200]
     lines = []
     for item in items:
         rel = item.relative_to(p)
@@ -159,7 +170,7 @@ async def search_files(
     results = []
 
     for file_path in p.glob(file_pattern):
-        if not file_path.is_file():
+        if not file_path.is_file() or not _check_resolved_path(file_path, p):
             continue
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
