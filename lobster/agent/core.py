@@ -728,10 +728,11 @@ class Agent:
                     logger.warning(f"length 压缩失败: {e}")
                 continue
 
-            # 追踪连续无文字回复的轮次（两级机制，避免长任务被误中断）
+            # 追踪连续无文字回复的轮次（阈值基于 max_loops，避免长任务被误中断）
+            _soft_hint = self.max_loops * 2 // 3       # 软提示：max_loops 的 2/3
+            _hard_stop = self.max_loops - 2             # 硬制止：接近段上限时
             rs.loops_without_text += 1
-            if rs.loops_without_text >= 20:
-                # 硬制止：20 轮纯工具无回复，必须停下
+            if rs.loops_without_text >= _hard_stop:
                 self.memory.add_message(Message(
                     role="system",
                     content=(
@@ -742,8 +743,7 @@ class Agent:
                     _is_intervention=True,
                 ))
                 rs.loops_without_text = 0
-            elif rs.loops_without_text == 12:
-                # 软提示：12 轮时建议汇报进度，但可以继续
+            elif rs.loops_without_text == _soft_hint:
                 self.memory.add_message(Message(
                     role="system",
                     content=(
