@@ -569,6 +569,8 @@ class FeishuChannel(BaseChannel):
         msg_content = message.get("content", "{}")
         chat_type = message.get("chat_type", "p2p")
 
+        logger.debug(f"原始消息 | chat_type={chat_type} msg_type={msg_type} content={msg_content[:200]}")
+
         _active_chat_id.set(chat_id)
         self._get_chat_state(chat_id)["last_user_message_id"] = msg_id
         set_current_chat_id(chat_id)
@@ -663,19 +665,21 @@ class FeishuChannel(BaseChannel):
         else:
             session_id = f"dm:{sender_id}" if sender_id else "default"
 
-        # 命令处理
-        if text == "/status":
+        # 命令处理（统一清理：去除零宽字符/不可见字符、兼容中文全角斜杠）
+        cmd = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff]', '', text).strip().replace("／", "/")
+        logger.debug(f"命令匹配 | chat_type={chat_type} msg_type={msg_type} text={text!r} cmd={cmd!r}")
+        if cmd == "/status":
             await self.send_card(chat_id, "🐦 灵雀状态", f"```\n{self.agent.get_status(session_id)}\n```")
             return
-        if text == "/clear":
+        if cmd == "/clear":
             self.agent.memory.set_session(session_id)
             self.agent.memory.clear_session()
             await self.send_card(chat_id, "🐦 已清空", "会话记忆已清除")
             return
-        if text.startswith("/model"):
-            await self._handle_model_command(text, session_id, chat_id)
+        if cmd.startswith("/model"):
+            await self._handle_model_command(cmd, session_id, chat_id)
             return
-        if text == "/reload":
+        if cmd == "/reload":
             await self._handle_reload_command(chat_id)
             return
 
@@ -814,8 +818,11 @@ class FeishuChannel(BaseChannel):
             self.agent._task_timeout = agent_cfg.task_timeout
             self.agent._tool_timeout = agent_cfg.tool_timeout
             self.agent.max_loops = agent_cfg.max_loops
+            self.agent._auto_continue = agent_cfg.auto_continue
+            max_steps = agent_cfg.max_loops * (1 + agent_cfg.auto_continue)
             reloaded.append(f"Agent: 任务超时={agent_cfg.task_timeout}s, "
-                          f"LLM超时={agent_cfg.llm_timeout}s, 最大循环={agent_cfg.max_loops}")
+                          f"LLM超时={agent_cfg.llm_timeout}s, "
+                          f"单段循环={agent_cfg.max_loops}, 自动续航={agent_cfg.auto_continue}次 (总上限{max_steps}步)")
 
             # 3. 安全配置
             allowed = new_config.security.get_allowed_paths()

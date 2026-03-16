@@ -130,6 +130,14 @@ class OpenAIProvider(BaseLLMProvider):
 
         reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
 
+        # MiniMax 兼容: reasoning_details 字段（reasoning_split=True 时返回）
+        if not reasoning_content:
+            reasoning_details = getattr(choice.message, "reasoning_details", None)
+            if reasoning_details and isinstance(reasoning_details, list):
+                parts = [d.get("text", "") for d in reasoning_details if isinstance(d, dict) and d.get("text")]
+                if parts:
+                    reasoning_content = "\n".join(parts)
+
         # 解析工具调用
         tool_calls = []
         if choice.message.tool_calls:

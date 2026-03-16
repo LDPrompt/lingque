@@ -141,9 +141,11 @@ class Agent:
             self.max_loops = agent_config.max_loops
             self._task_timeout = agent_config.task_timeout
             self._tool_timeout = agent_config.tool_timeout
+            self._auto_continue = agent_config.auto_continue
         else:
             self._task_timeout = 600
             self._tool_timeout = 120
+            self._auto_continue = 2
 
         self._confirm_callback = None
         self._progress_callback = None
@@ -548,17 +550,53 @@ class Agent:
             except Exception as e:
                 logger.warning(f"规划步骤失败，跳过: {e}")
 
-        for loop_idx in range(self.max_loops):
+        # 长任务自动续航: 总步数上限 = max_loops * (1 + auto_continue)
+        max_total_steps = self.max_loops * (1 + self._auto_continue)
+        step = 0
+        segment = 0              # 当前是第几段（0-based）
+        segment_step = 0         # 当前段内第几步
+        is_first_llm_call = True
+
+        while step < max_total_steps:
             elapsed = time.monotonic() - start_time
             if elapsed > self._task_timeout:
                 logger.warning(f"硬超时 ({self._task_timeout}s)")
-                final_response = await self._generate_summary(system_prompt, elapsed, loop_idx)
+                final_response = await self._generate_summary(system_prompt, elapsed, step)
                 break
 
-            logger.info(f"Agent 循环 #{loop_idx + 1} ({elapsed:.0f}s)")
+            # --- 自动续航检查点：到达段边界时压缩上下文并继续 ---
+            if segment_step >= self.max_loops:
+                segment += 1
+                segment_step = 0
+                logger.info(f"🔄 长任务自动续航 #{segment} | 已执行 {step} 步，压缩上下文继续")
+                try:
+                    await self.memory.compress_context(self.llm)
+                except Exception as e:
+                    logger.warning(f"续航压缩失败: {e}")
+                self.memory.add_message(Message(
+                    role="system",
+                    content=(
+                        f"[系统] 你已连续执行了 {step} 步工具调用。上下文已自动压缩，请继续完成任务。"
+                        "不要重复已经完成的步骤，直接执行下一步。"
+                        "如果任务已完成，直接给用户最终回复。"
+                    ),
+                    _is_intervention=True,
+                ))
+                if self._progress_callback:
+                    try:
+                        await self._progress_callback(
+                            segment, self._auto_continue,
+                            f"auto_continue_#{segment}", "running",
+                        )
+                    except Exception:
+                        pass
 
-            # 每 4 轮检查一次，必要时压缩上下文（合并后的统一逻辑）
-            if loop_idx > 0 and loop_idx % 4 == 0 and len(self.memory.messages) > 20:
+            step += 1
+            segment_step += 1
+            logger.info(f"Agent 循环 #{step} (段{segment+1} 步{segment_step}, {elapsed:.0f}s)")
+
+            # 每 4 轮检查一次，必要时压缩上下文
+            if segment_step > 1 and segment_step % 4 == 0 and len(self.memory.messages) > 20:
                 try:
                     from .memory import count_messages_tokens
                     mid_tokens = count_messages_tokens(self.memory.messages)
@@ -576,11 +614,9 @@ class Agent:
                 logger.warning(f"检测到死循环: {stuck_tool} - {stuck_reason} [类型: {stuck_type}] (第 {rs.stuck_intervention_count} 次干预)")
                 
                 if rs.stuck_intervention_count >= 3:
-                    # 第3次干预: 强制总结并通知用户，不再给机会
-                    final_response = await self._generate_summary(system_prompt, elapsed, loop_idx)
+                    final_response = await self._generate_summary(system_prompt, elapsed, step)
                     break
                 else:
-                    # 第1次干预: 注入 system 级强制停止指令
                     recovery_strategy = self._get_recovery_strategy(stuck_type, stuck_tool)
                     self.memory.add_message(Message(
                         role="system",
@@ -594,7 +630,6 @@ class Agent:
                         ),
                         _is_intervention=True,
                     ))
-                    # 从工具列表中移除问题工具，使 LLM 物理上无法再调用
                     tools = [t for t in tools if t["name"] != stuck_tool]
                     logger.info(f"已从工具列表移除 {stuck_tool}，剩余 {len(tools)} 个工具")
                     rs.recent_tool_calls.clear()
@@ -611,7 +646,8 @@ class Agent:
                 )
                 consecutive_errors = 0
 
-                if loop_idx == 0:
+                if is_first_llm_call:
+                    is_first_llm_call = False
                     for msg in self.memory.messages:
                         if msg.images:
                             msg.images = []
@@ -625,7 +661,6 @@ class Agent:
                     self.memory.messages = self.memory._validate_message_pairs(self.memory.messages)
                     
                     if consecutive_errors >= 3 and not getattr(self, '_session_restarted', False):
-                        # 精简重启：仅允许一次，用标记位防止重复重启
                         logger.error("连续修复失败，精简重启（仅一次机会）")
                         self._session_restarted = True
                         last_user_msg = user_input
@@ -636,7 +671,6 @@ class Agent:
                         self.memory.clear_session()
                         self.memory.add_message(Message(role="user", content=last_user_msg))
                     elif consecutive_errors >= 4:
-                        # 重启后仍然失败，直接返回错误
                         final_response = "消息格式持续异常，请重新开始对话。"
                         self.memory.add_message(Message(role="assistant", content=final_response))
                         return final_response
@@ -666,7 +700,7 @@ class Agent:
                 ))
                 continue
 
-            # 情况 A: LLM 返回纯文本（或 stop_reason=stop 且有内容时优先采纳文本）
+            # 情况 A: LLM 返回纯文本
             if not response.tool_calls:
                 rs.loops_without_text = 0
                 final_response = response.content
@@ -694,7 +728,7 @@ class Agent:
                     logger.warning(f"length 压缩失败: {e}")
                 continue
 
-            # 追踪连续无文字回复的轮次（独立软警告，不影响 stuck_intervention_count）
+            # 追踪连续无文字回复的轮次
             rs.loops_without_text += 1
             if rs.loops_without_text >= 8:
                 self.memory.add_message(Message(
@@ -713,7 +747,6 @@ class Agent:
             total_tools = len(response.tool_calls)
             
             for idx, tool_call in enumerate(response.tool_calls, 1):
-                # 用户已取消，跳过剩余工具
                 if self._rs().user_cancelled:
                     tool_results.append((tool_call, "[用户已取消] 操作被跳过"))
                     continue
@@ -810,8 +843,9 @@ class Agent:
                 logger.info("用户取消操作，Agent 循环终止")
                 break
         else:
+            # while 循环正常结束（达到 max_total_steps）
             elapsed = time.monotonic() - start_time
-            final_response = await self._generate_summary(system_prompt, elapsed, self.max_loops)
+            final_response = await self._generate_summary(system_prompt, elapsed, step)
 
         # === 自我进化: 任务后反思 ===
         await self._post_task_reflect(user_input, system_prompt)
@@ -824,18 +858,18 @@ class Agent:
         return final_response
 
     async def _generate_summary(self, system_prompt: str, elapsed: float, steps: int) -> str:
-        """让 LLM 总结当前进度（不是"强制停止"，而是智能总结）"""
+        """让 LLM 总结当前进度"""
         logger.warning(f"请求总结 ({steps} 步, {elapsed:.0f}s)")
         
         self.memory.add_message(
             Message(
                 role="user",
                 content=(
-                    f"[系统] 你已经执行了 {steps} 个步骤 ({elapsed:.0f} 秒)。"
+                    f"[系统] 你已经执行了 {steps} 个步骤 ({elapsed:.0f} 秒)，任务处理已到达上限。"
                     "请总结目前的工作成果：\n"
                     "1. 已完成的部分\n"
-                    "2. 尚未完成的部分\n"
-                    "3. 告诉用户说「继续」即可让你自动完成剩余步骤\n"
+                    "2. 尚未完成的部分（如有）\n"
+                    "3. 如果还有未完成的工作，告诉用户发送「继续」即可接着完成\n"
                     "不要建议用户手动操作，不要再调用工具，直接回复。"
                 ),
             )

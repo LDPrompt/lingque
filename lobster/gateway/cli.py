@@ -85,6 +85,7 @@ class CLIChannel(BaseChannel):
             self.agent._task_timeout = new_config.agent.task_timeout
             self.agent._tool_timeout = new_config.agent.tool_timeout
             self.agent.max_loops = new_config.agent.max_loops
+            self.agent._auto_continue = new_config.agent.auto_continue
             self.agent.require_confirmation = new_config.security.require_confirmation
 
             # 安全路径
