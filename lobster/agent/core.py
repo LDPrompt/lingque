@@ -728,19 +728,31 @@ class Agent:
                     logger.warning(f"length 压缩失败: {e}")
                 continue
 
-            # 追踪连续无文字回复的轮次
+            # 追踪连续无文字回复的轮次（两级机制，避免长任务被误中断）
             rs.loops_without_text += 1
-            if rs.loops_without_text >= 8:
+            if rs.loops_without_text >= 20:
+                # 硬制止：20 轮纯工具无回复，必须停下
                 self.memory.add_message(Message(
                     role="system",
                     content=(
                         f"[SYSTEM OVERRIDE] You have executed {rs.loops_without_text} consecutive tool calls "
                         f"({rs.total_tool_calls} total) without replying to the user.\n"
-                        "STOP calling tools. Summarize the information you have and respond to the user NOW."
+                        "You MUST stop calling tools NOW. Summarize your progress and respond to the user."
                     ),
                     _is_intervention=True,
                 ))
                 rs.loops_without_text = 0
+            elif rs.loops_without_text == 12:
+                # 软提示：12 轮时建议汇报进度，但可以继续
+                self.memory.add_message(Message(
+                    role="system",
+                    content=(
+                        f"[提示] 你已连续执行了 {rs.loops_without_text} 步工具调用。"
+                        "如果任务还在正常推进，可以继续执行。"
+                        "但建议在下一个阶段性节点时给用户一个简短的进度更新。"
+                    ),
+                    _is_intervention=True,
+                ))
 
             # 情况 B: LLM 请求调用工具
             tool_results = []
