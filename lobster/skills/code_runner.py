@@ -83,11 +83,6 @@ def _check_dangerous_patterns(command: str) -> str | None:
     return None
 
 
-def _redact_secrets(output: str) -> str:
-    from ..agent.memory import redact_secrets
-    return redact_secrets(output)
-
-
 def _is_safe_command(command: str) -> bool:
     cmd_stripped = command.strip()
     if ">>" in cmd_stripped or re.search(r'[^|]>[^|]', cmd_stripped):
@@ -130,7 +125,6 @@ async def _execute_shell(command: str, timeout: int) -> str:
         if len(result) > 10000:
             result = result[:10000] + "\n...(输出已截断)"
 
-        result = _redact_secrets(result)
         return result.strip() if result.strip() else "(无输出)"
     except Exception as e:
         return f"命令执行失败: {e}"
@@ -355,7 +349,7 @@ async def run_python(code: str, timeout: int = 30) -> str:
             result_parts.append(f"[exit code] {proc.returncode}")
 
         output = "\n".join(result_parts) if result_parts else "(无输出)"
-        return _redact_secrets(output)
+        return output
 
     finally:
         os.unlink(tmp_path)

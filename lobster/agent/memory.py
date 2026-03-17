@@ -149,6 +149,9 @@ class Memory:
         # 待异步提取的会话消息（按 session_id 隔离，由 flush_session_memories 消费）
         self._pending_flush_messages: dict[str, list[Message]] = {}
 
+        # 空闲超时后需要压缩的会话（由 set_session 标记，由 process_message 消费）
+        self._needs_idle_compress: set[str] = set()
+
         # 会话持久化目录
         self._session_dir = self.memory_dir / "sessions"
         self._session_dir.mkdir(exist_ok=True)
@@ -183,28 +186,33 @@ class Memory:
     _MAX_SESSIONS = 50  # 最多保留的会话数量
 
     def set_session(self, session_id: str):
-        """切换到指定会话（带空闲超时和每日重置检测）"""
+        """切换到指定会话（带空闲超时和每日重置检测）
+
+        空闲超时 → 标记压缩（保留上下文摘要，用户回来能接着聊）
+        每日重置 → 清空（每天一个干净起点）
+        """
         _ctx_session.set(session_id)
         now = datetime.now()
 
         if session_id in self._sessions:
-            should_reset = False
+            idle_timeout = False
+            daily_reset = False
 
-            # 空闲超时
+            # 空闲超时检测
             last_active = self._session_last_active.get(session_id)
             if last_active and (now - last_active) > timedelta(minutes=self.idle_timeout_minutes):
-                should_reset = True
-                logger.info(f"会话 {session_id} 空闲超时 ({self.idle_timeout_minutes}min)，自动重置")
+                idle_timeout = True
 
-            # 每日重置（跨过了当天的重置时刻）
+            # 每日重置检测（跨过了当天的重置时刻）
             start_time = self._session_start_times.get(session_id)
             if start_time:
                 today_reset = now.replace(hour=self.daily_reset_hour, minute=0, second=0, microsecond=0)
                 if start_time < today_reset <= now:
-                    should_reset = True
-                    logger.info(f"会话 {session_id} 跨日重置")
+                    daily_reset = True
 
-            if should_reset:
+            if daily_reset:
+                # 每日重置：完全清空，提取记忆
+                logger.info(f"会话 {session_id} 跨日重置")
                 old_msgs = list(self._sessions.get(session_id, []))
                 self._save_session_summary(session_id)
                 if len(old_msgs) >= 6:
@@ -213,6 +221,10 @@ class Memory:
                 self._pending_per_session[session_id] = set()
                 self._session_start_times[session_id] = now
                 self._delete_session_file(session_id)
+            elif idle_timeout and len(self._sessions.get(session_id, [])) >= 4:
+                # 空闲超时：标记压缩（不清空，保留上下文），下次 process_message 时压缩
+                logger.info(f"会话 {session_id} 空闲超时 ({self.idle_timeout_minutes}min)，标记待压缩")
+                self._needs_idle_compress.add(session_id)
 
         if session_id not in self._sessions:
             self._sessions[session_id] = []

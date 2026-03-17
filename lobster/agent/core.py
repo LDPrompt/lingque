@@ -456,6 +456,17 @@ class Agent:
         self.memory.set_session(session_id)
         self.memory.set_user(user_id)
         await self.memory.flush_session_memories(self.llm)
+
+        # 空闲超时恢复：压缩旧上下文而非清空，用户回来仍有摘要
+        if session_id in self.memory._needs_idle_compress:
+            self.memory._needs_idle_compress.discard(session_id)
+            if len(self.memory.messages) >= 4:
+                logger.info(f"空闲超时恢复压缩: {session_id}, {len(self.memory.messages)} 条消息")
+                try:
+                    await self.memory.compress_context(self.llm)
+                except Exception as e:
+                    logger.warning(f"空闲恢复压缩失败: {e}")
+
         self.llm.reset_task_usage()
         timeout = self._task_timeout
         try:
@@ -829,9 +840,8 @@ class Agent:
                 )
             )
             MAX_TOOL_RESULT_CHARS = 3000
-            from .memory import redact_secrets as _redact
             for tool_call, result in tool_results:
-                content = _redact(result)
+                content = result
                 if len(content) > MAX_TOOL_RESULT_CHARS:
                     content = content[:MAX_TOOL_RESULT_CHARS] + f"\n... [结果已截断，原始 {len(result)} 字符]"
                 self.memory.add_message(

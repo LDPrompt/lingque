@@ -223,7 +223,7 @@ class MCPConfig(BaseSettings):
 class SessionConfig(BaseSettings):
     """会话管理配置"""
     model_config = _ENV_CONFIG
-    idle_timeout_minutes: int = Field(120, alias="SESSION_IDLE_TIMEOUT")
+    idle_timeout_minutes: int = Field(480, alias="SESSION_IDLE_TIMEOUT")
     daily_reset_hour: int = Field(4, alias="SESSION_DAILY_RESET_HOUR")
 
 
@@ -280,5 +280,12 @@ def get_config() -> Config:
     if _config is None:
         from dotenv import load_dotenv
         load_dotenv(override=False)
+
+        try:
+            from .skills.credential_skills import load_credentials_to_env
+            load_credentials_to_env()
+        except Exception:
+            pass
+
         _config = Config()
     return _config

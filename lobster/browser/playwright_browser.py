@@ -251,147 +251,262 @@ class BrowserResult:
 
 _STEALTH_JS = """
 (() => {
-  // 1. navigator.webdriver → undefined
+  // 会话稳定种子：同一浏览器实例内指纹一致，不同实例间有差异
+  const _s = (Math.random() * 0xFFFFFF) | 0;
+  const _pick = (arr) => arr[_s % arr.length];
+
+  // ===== 1. navigator.webdriver → undefined =====
   const nd = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
   if (nd) {
-    Object.defineProperty(Navigator.prototype, 'webdriver', {
-      get: () => undefined,
-      configurable: true,
-    });
+    Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true });
   } else {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true,
-    });
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
   }
 
-  // 2. navigator.plugins — 模拟真实 Chrome 插件列表
+  // ===== 2. navigator.plugins =====
   Object.defineProperty(navigator, 'plugins', {
     get: () => {
-      const mkPlugin = (name, desc, fn, mt) => {
+      const mk = (name, desc, fn, mt) => {
         const m = { type: mt, suffixes: '', description: desc, enabledPlugin: null };
-        const p = { name, description: desc, filename: fn, length: 1, 0: m, item: i => m, namedItem: n => m };
-        m.enabledPlugin = p;
-        return p;
+        const p = { name, description: desc, filename: fn, length: 1, 0: m, item: () => m, namedItem: () => m };
+        m.enabledPlugin = p; return p;
       };
-      const arr = [
-        mkPlugin('Chrome PDF Plugin', 'Portable Document Format', 'internal-pdf-viewer', 'application/x-google-chrome-pdf'),
-        mkPlugin('Chrome PDF Viewer', '', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', 'application/pdf'),
-        mkPlugin('Native Client', '', 'internal-nacl-plugin', 'application/x-nacl'),
+      const a = [
+        mk('Chrome PDF Plugin', 'Portable Document Format', 'internal-pdf-viewer', 'application/x-google-chrome-pdf'),
+        mk('Chrome PDF Viewer', '', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', 'application/pdf'),
+        mk('Native Client', '', 'internal-nacl-plugin', 'application/x-nacl'),
       ];
-      arr.length = 3;
-      return arr;
+      a.length = 3; return a;
     },
   });
 
-  // 3. navigator.languages
+  // ===== 3. navigator.languages =====
   Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'] });
 
-  // 4. navigator.hardwareConcurrency / deviceMemory
-  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-  if (!navigator.deviceMemory) {
-    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-  }
+  // ===== 4. 硬件参数随机化 =====
+  const cpuCores = _pick([4, 6, 8, 12, 16]);
+  const devMem = _pick([4, 8, 8, 16]);
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => cpuCores });
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => devMem, configurable: true });
 
-  // 5. window.chrome 对象
-  if (!window.chrome) {
-    window.chrome = {};
-  }
+  // ===== 5. window.chrome =====
+  if (!window.chrome) window.chrome = {};
   if (!window.chrome.runtime) {
     window.chrome.runtime = {
-      connect: () => {},
-      sendMessage: () => {},
-      onMessage: { addListener: () => {}, removeListener: () => {} },
-      id: undefined,
+      connect: () => {}, sendMessage: () => {},
+      onMessage: { addListener: () => {}, removeListener: () => {} }, id: undefined,
     };
   }
   window.chrome.csi = window.chrome.csi || (() => ({}));
   window.chrome.loadTimes = window.chrome.loadTimes || (() => ({
-    requestTime: Date.now() / 1000,
-    startLoadTime: Date.now() / 1000,
-    firstPaintAfterLoadTime: 0,
-    firstPaintTime: Date.now() / 1000,
-    commitLoadTime: Date.now() / 1000,
-    finishDocumentLoadTime: Date.now() / 1000,
-    finishLoadTime: Date.now() / 1000,
-    navigationType: 'Other',
-    connectionInfo: 'h2',
-    npnNegotiatedProtocol: 'h2',
-    wasAlternateProtocolAvailable: false,
-    wasFetchedViaSpdy: true,
-    wasNpnNegotiated: true,
+    requestTime: Date.now()/1000, startLoadTime: Date.now()/1000,
+    firstPaintAfterLoadTime: 0, firstPaintTime: Date.now()/1000,
+    commitLoadTime: Date.now()/1000, finishDocumentLoadTime: Date.now()/1000,
+    finishLoadTime: Date.now()/1000, navigationType: 'Other',
+    connectionInfo: 'h2', npnNegotiatedProtocol: 'h2',
+    wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true,
   }));
 
-  // 6. Permissions API — 隐藏 "notifications denied" 自动化特征
+  // ===== 6. Permissions API =====
   const origQuery = window.Permissions?.prototype?.query;
   if (origQuery) {
     window.Permissions.prototype.query = function(desc) {
-      if (desc?.name === 'notifications') {
-        return Promise.resolve({ state: Notification.permission });
-      }
+      if (desc?.name === 'notifications') return Promise.resolve({ state: Notification.permission });
       return origQuery.call(this, desc);
     };
   }
 
-  // 7. WebGL 渲染器信息 — 使用常见的显卡信息
-  const getParameter = WebGLRenderingContext?.prototype?.getParameter;
-  if (getParameter) {
-    const handler = {
-      apply(target, thisArg, args) {
-        const param = args[0];
-        const ext = thisArg.getExtension('WEBGL_debug_renderer_info');
+  // ===== 7. WebGL 渲染器随机化 =====
+  const gpus = [
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (AMD)', 'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (Intel)', 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+  ];
+  const gpu = _pick(gpus);
+  const _patchWebGL = (proto) => {
+    if (!proto?.getParameter) return;
+    const orig = proto.getParameter;
+    proto.getParameter = new Proxy(orig, {
+      apply(target, self, args) {
+        const ext = self.getExtension('WEBGL_debug_renderer_info');
         if (ext) {
-          if (param === ext.UNMASKED_VENDOR_WEBGL) return 'Google Inc. (NVIDIA)';
-          if (param === ext.UNMASKED_RENDERER_WEBGL) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)';
+          if (args[0] === ext.UNMASKED_VENDOR_WEBGL) return gpu[0];
+          if (args[0] === ext.UNMASKED_RENDERER_WEBGL) return gpu[1];
         }
-        return target.apply(thisArg, args);
+        return target.apply(self, args);
       }
-    };
-    WebGLRenderingContext.prototype.getParameter = new Proxy(getParameter, handler);
-  }
-  const getParameter2 = WebGL2RenderingContext?.prototype?.getParameter;
-  if (getParameter2) {
-    const handler2 = {
-      apply(target, thisArg, args) {
-        const param = args[0];
-        const ext = thisArg.getExtension('WEBGL_debug_renderer_info');
-        if (ext) {
-          if (param === ext.UNMASKED_VENDOR_WEBGL) return 'Google Inc. (NVIDIA)';
-          if (param === ext.UNMASKED_RENDERER_WEBGL) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)';
-        }
-        return target.apply(thisArg, args);
-      }
-    };
-    WebGL2RenderingContext.prototype.getParameter = new Proxy(getParameter2, handler2);
-  }
+    });
+  };
+  _patchWebGL(WebGLRenderingContext?.prototype);
+  _patchWebGL(WebGL2RenderingContext?.prototype);
 
-  // 8. 移除 Playwright/Puppeteer 注入的全局变量
+  // ===== 8. 移除自动化全局变量 =====
   delete window.__playwright;
   delete window.__pw_manual;
   delete window.__puppeteer_evaluation_script__;
 
-  // 9. iframe contentWindow 代理 — 防止通过 iframe 检测
+  // ===== 9. iframe 代理 =====
   try {
-    const origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
-    if (origContentWindow?.get) {
+    const origCW = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    if (origCW?.get) {
       Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
         get: function() {
-          const w = origContentWindow.get.call(this);
-          if (w) {
-            try {
-              Object.defineProperty(w.navigator, 'webdriver', { get: () => undefined });
-            } catch(e) {}
-          }
+          const w = origCW.get.call(this);
+          if (w) { try { Object.defineProperty(w.navigator, 'webdriver', { get: () => undefined }); } catch(e) {} }
           return w;
         }
       });
     }
   } catch(e) {}
 
-  // 10. console.debug 清理 — 部分检测脚本通过 console 判断
-  // (保持原样不做修改，减少指纹差异)
+  // ===== 10. Canvas 指纹随机化 =====
+  const _addCanvasNoise = (canvas) => {
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const w = canvas.width, h = canvas.height;
+      if (w === 0 || h === 0) return;
+      const imageData = ctx.getImageData(0, 0, Math.min(w, 16), Math.min(h, 16));
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = d[i] ^ (_s >> (i % 8) & 1);
+      }
+      ctx.putImageData(imageData, 0, 0);
+    } catch(e) {}
+  };
+  const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function() {
+    _addCanvasNoise(this);
+    return _origToDataURL.apply(this, arguments);
+  };
+  const _origToBlob = HTMLCanvasElement.prototype.toBlob;
+  if (_origToBlob) {
+    HTMLCanvasElement.prototype.toBlob = function() {
+      _addCanvasNoise(this);
+      return _origToBlob.apply(this, arguments);
+    };
+  }
+  const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData = function() {
+    const imageData = _origGetImageData.apply(this, arguments);
+    const d = imageData.data;
+    for (let i = 0; i < Math.min(d.length, 64); i += 4) {
+      d[i] = d[i] ^ (_s >> (i % 8) & 1);
+    }
+    return imageData;
+  };
+
+  // ===== 11. WebRTC IP 泄漏防护 =====
+  if (window.RTCPeerConnection) {
+    const OrigRTC = window.RTCPeerConnection;
+    window.RTCPeerConnection = function(config, constraints) {
+      if (config && config.iceServers) {
+        config.iceServers = config.iceServers.filter(s => {
+          const urls = Array.isArray(s.urls) ? s.urls : [s.urls || s.url || ''];
+          return !urls.some(u => typeof u === 'string' && u.startsWith('stun:'));
+        });
+      }
+      return new OrigRTC(config, constraints);
+    };
+    window.RTCPeerConnection.prototype = OrigRTC.prototype;
+    Object.defineProperty(window, 'RTCPeerConnection', { writable: false, configurable: false });
+  }
+  if (window.webkitRTCPeerConnection) {
+    window.webkitRTCPeerConnection = window.RTCPeerConnection;
+  }
+
+  // ===== 12. AudioContext 指纹随机化 =====
+  const _patchAudio = (ACtx) => {
+    if (!ACtx?.prototype) return;
+    const origCreate = ACtx.prototype.createAnalyser;
+    if (origCreate) {
+      ACtx.prototype.createAnalyser = function() {
+        const analyser = origCreate.apply(this, arguments);
+        const origGetFloat = analyser.getFloatFrequencyData.bind(analyser);
+        analyser.getFloatFrequencyData = function(array) {
+          origGetFloat(array);
+          for (let i = 0; i < Math.min(array.length, 32); i++) {
+            array[i] += (_s % 7 - 3) * 0.001;
+          }
+        };
+        return analyser;
+      };
+    }
+    const origGetChannelData = AudioBuffer?.prototype?.getChannelData;
+    if (origGetChannelData) {
+      AudioBuffer.prototype.getChannelData = function(channel) {
+        const data = origGetChannelData.call(this, channel);
+        if (data.length > 0) {
+          for (let i = 0; i < Math.min(data.length, 10); i++) {
+            data[i] += (_s % 5 - 2) * 1e-7;
+          }
+        }
+        return data;
+      };
+    }
+  };
+  _patchAudio(window.AudioContext);
+  _patchAudio(window.webkitAudioContext);
+
+  // ===== 13. ClientRects 指纹随机化 =====
+  const _rectNoise = (_s % 7 + 1) * 0.00001;
+  const _origGetBCR = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function() {
+    const rect = _origGetBCR.call(this);
+    return new DOMRect(
+      rect.x + _rectNoise, rect.y + _rectNoise,
+      rect.width + _rectNoise, rect.height + _rectNoise
+    );
+  };
+  const _origGetCR = Element.prototype.getClientRects;
+  Element.prototype.getClientRects = function() {
+    const rects = _origGetCR.call(this);
+    const out = [];
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      out.push(new DOMRect(r.x + _rectNoise, r.y + _rectNoise, r.width + _rectNoise, r.height + _rectNoise));
+    }
+    out.item = (idx) => out[idx];
+    Object.defineProperty(out, 'length', { value: rects.length });
+    return out;
+  };
 })();
 """
+
+
+# ==================== 字体 CDN 拦截（防止外部字体加载超时导致截图失败） ====================
+
+_BLOCKED_FONT_DOMAINS = (
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "use.typekit.net",
+    "fast.fonts.net",
+    "cloud.typography.com",
+    "use.fontawesome.com",
+    "cdn.jsdelivr.net/npm/@fontsource",
+    "at.alicdn.com",
+    "cdn.bootcdn.net",
+)
+
+
+async def _block_font_route(route):
+    """拦截外部字体请求，返回空响应避免 30 秒超时"""
+    url = route.request.url
+    if route.request.resource_type == "font" or any(d in url for d in _BLOCKED_FONT_DOMAINS):
+        await route.fulfill(status=200, content_type="font/woff2", body=b"")
+    else:
+        await route.continue_()
+
+
+async def _setup_font_blocking(context):
+    """为浏览器上下文注册字体拦截路由"""
+    for domain in _BLOCKED_FONT_DOMAINS:
+        await context.route(f"**/{domain}/**", _block_font_route)
+    await context.route("**/*.woff2", _block_font_route)
+    await context.route("**/*.woff", _block_font_route)
 
 
 # ==================== Cookie 管理 ====================
@@ -557,6 +672,7 @@ class PlaywrightBrowser:
             )
 
         await self._context.add_init_script(_STEALTH_JS)
+        await _setup_font_blocking(self._context)
 
         if self._context.pages:
             self._page = self._context.pages[0]
@@ -598,6 +714,7 @@ class PlaywrightBrowser:
         )
 
         await self._context.add_init_script(_STEALTH_JS)
+        await _setup_font_blocking(self._context)
 
         self._page = await self._context.new_page()
         self._page.set_default_timeout(self.timeout)
