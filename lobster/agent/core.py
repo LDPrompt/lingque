@@ -68,17 +68,16 @@ def _get_learning_engine():
 
 logger = logging.getLogger("lobster.agent")
 
-STUCK_LOOP_WINDOW = 8
+STUCK_LOOP_WINDOW = 12
 
 # 容易陷入"调试循环"的工具（每次参数不同，但本质是重复尝试）
 # 对这些工具只按名称计数，不管参数是否相同
+# 注意: run_query/run_command 是通用工具，连续调用是正常行为，不应归为易循环
 LOOP_PRONE_TOOLS = {
-    # 代码执行类
-    "run_python", "sandbox_python", "sandbox_bash", "run_command",
+    # 代码执行类（真正容易陷入"改一行→报错→再改"死循环的）
+    "run_python", "sandbox_python", "sandbox_bash",
     # 浏览器 JS 执行（每次调用独立上下文，LLM 不知道状态不共享）
     "browser_execute_js",
-    # 查询类（LLM 喜欢反复用不同命令查询同一件事）
-    "run_query",
 }
 
 # 工具类别映射（用于类别级别的循环检测）
@@ -142,10 +141,12 @@ class Agent:
             self._task_timeout = agent_config.task_timeout
             self._tool_timeout = agent_config.tool_timeout
             self._auto_continue = agent_config.auto_continue
+            self._max_tool_result_chars = agent_config.max_tool_result_chars
         else:
             self._task_timeout = 600
             self._tool_timeout = 120
             self._auto_continue = 2
+            self._max_tool_result_chars = 15000
 
         self._confirm_callback = None
         self._progress_callback = None
@@ -261,22 +262,22 @@ class Agent:
         """
         rs = self._rs()
         
-        # 规则 2: 同一工具连续调用 N 次（易循环工具 2 次，普通工具 3 次）
-        streak_threshold = 2 if rs.last_tool_name in LOOP_PRONE_TOOLS else 3
+        # 规则 2: 同一工具连续调用 N 次（易循环工具 4 次，普通工具 6 次）
+        streak_threshold = 4 if rs.last_tool_name in LOOP_PRONE_TOOLS else 6
         if rs.same_tool_streak >= streak_threshold:
             rs.stuck_type = "tool_repeat"
             return rs.last_tool_name, f"连续调用 {rs.last_tool_name} {rs.same_tool_streak} 次", "tool_repeat"
         
-        # 规则 4: 同类工具连续调用 6 次（跳过 "other" 这个 catch-all 分类）
-        if rs.same_category_streak >= 6 and rs.last_tool_category != "other":
+        # 规则 4: 同类工具连续调用 10 次（跳过 "other" 这个 catch-all 分类）
+        if rs.same_category_streak >= 10 and rs.last_tool_category != "other":
             cat = rs.last_tool_category
             rs.stuck_type = "category_loop"
             return rs.last_tool_name, f"连续调用 {cat} 类工具 {rs.same_category_streak} 次", "category_loop"
         
-        # 规则 7 提前: 全局超限
-        if rs.total_tool_calls >= 20 and rs.full_tool_history:
+        # 规则 7 提前: 全局超限（长任务模式下 120 步，单工具用 20 次很正常）
+        if rs.total_tool_calls >= 60 and rs.full_tool_history:
             top_tool = Counter(rs.full_tool_history).most_common(1)[0]
-            if top_tool[1] >= 8:
+            if top_tool[1] >= 25:
                 rs.stuck_type = "global_overuse"
                 return top_tool[0], f"本次任务已调用 {rs.total_tool_calls} 次工具，其中 {top_tool[0]} 被调用 {top_tool[1]} 次", "global_overuse"
         
@@ -298,7 +299,7 @@ class Agent:
             else:
                 break
         
-        if consecutive_loop_prone >= 2:
+        if consecutive_loop_prone >= 4:
             rs.stuck_type = "code_loop"
             return last_lp_tool, f"连续调用 {last_lp_tool} {consecutive_loop_prone} 次，本质是重复尝试", "code_loop"
         
@@ -624,7 +625,7 @@ class Agent:
                 rs.stuck_intervention_count += 1
                 logger.warning(f"检测到死循环: {stuck_tool} - {stuck_reason} [类型: {stuck_type}] (第 {rs.stuck_intervention_count} 次干预)")
                 
-                if rs.stuck_intervention_count >= 3:
+                if rs.stuck_intervention_count >= 5:
                     final_response = await self._generate_summary(system_prompt, elapsed, step)
                     break
                 else:
@@ -839,11 +840,10 @@ class Agent:
                     reasoning_content=response.reasoning_content,
                 )
             )
-            MAX_TOOL_RESULT_CHARS = 3000
             for tool_call, result in tool_results:
                 content = result
-                if len(content) > MAX_TOOL_RESULT_CHARS:
-                    content = content[:MAX_TOOL_RESULT_CHARS] + f"\n... [结果已截断，原始 {len(result)} 字符]"
+                if self._max_tool_result_chars > 0 and len(content) > self._max_tool_result_chars:
+                    content = content[:self._max_tool_result_chars] + f"\n... [结果已截断，原始 {len(result)} 字符]"
                 self.memory.add_message(
                     Message(
                         role="tool",

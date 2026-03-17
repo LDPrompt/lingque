@@ -86,6 +86,11 @@ class CLIChannel(BaseChannel):
             self.agent._tool_timeout = new_config.agent.tool_timeout
             self.agent.max_loops = new_config.agent.max_loops
             self.agent._auto_continue = new_config.agent.auto_continue
+            self.agent._max_tool_result_chars = new_config.agent.max_tool_result_chars
+            from ..skills import registry as _reg
+            _reg.max_result_chars = new_config.agent.max_tool_result_chars
+            for p in self.agent.llm.providers.values():
+                p.max_output_tokens = new_config.agent.max_output_tokens
             self.agent.require_confirmation = new_config.security.require_confirmation
 
             # 安全路径

@@ -54,13 +54,13 @@ class OpenAIProvider(BaseLLMProvider):
             if msg.role == "tool":
                 api_messages.append({
                     "role": "tool",
-                    "content": msg.content,
-                    "tool_call_id": msg.tool_call_id,
+                    "content": msg.content or "(empty)",
+                    "tool_call_id": msg.tool_call_id or "unknown",
                 })
             elif msg.role == "assistant" and msg.tool_calls:
                 assistant_msg = {
                     "role": "assistant",
-                    "content": msg.content or None,
+                    "content": msg.content or "",
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -73,8 +73,8 @@ class OpenAIProvider(BaseLLMProvider):
                         for tc in msg.tool_calls
                     ],
                 }
-                if msg.reasoning_content or self.extra_body:
-                    assistant_msg["reasoning_content"] = msg.reasoning_content or ""
+                if msg.reasoning_content:
+                    assistant_msg["reasoning_content"] = msg.reasoning_content
                 api_messages.append(assistant_msg)
             elif msg.role == "user" and msg.images:
                 content_parts = []
@@ -91,7 +91,9 @@ class OpenAIProvider(BaseLLMProvider):
                     })
                 api_messages.append({"role": "user", "content": content_parts})
             else:
-                api_messages.append({"role": msg.role, "content": msg.content})
+                api_messages.append({"role": msg.role, "content": msg.content or ""})
+
+        api_messages = self._sanitize_messages(api_messages)
 
         if self.fixed_temperature is not None:
             temperature = self.fixed_temperature
@@ -106,8 +108,9 @@ class OpenAIProvider(BaseLLMProvider):
         kwargs = {
             "model": self.model,
             "messages": api_messages,
-            "max_tokens": 8192,
         }
+        if self.max_output_tokens > 0:
+            kwargs["max_tokens"] = self.max_output_tokens
 
         if temperature is not None:
             kwargs["temperature"] = temperature
@@ -193,6 +196,45 @@ class OpenAIProvider(BaseLLMProvider):
         )
         resp.tool_calls_truncated = _tool_calls_truncated
         return resp
+
+    @staticmethod
+    def _sanitize_messages(api_messages: list[dict]) -> list[dict]:
+        """清洗消息列表，修复工具调用配对问题（GLM 等 API 严格校验）"""
+        valid_tc_ids: set[str] = set()
+        for m in api_messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    valid_tc_ids.add(tc.get("id", ""))
+
+        result = []
+        for m in api_messages:
+            if m.get("role") == "tool":
+                tc_id = m.get("tool_call_id", "")
+                if tc_id not in valid_tc_ids:
+                    logger.debug(f"移除孤立 tool 消息: tool_call_id={tc_id}")
+                    continue
+            result.append(m)
+
+        cleaned = []
+        i = 0
+        while i < len(result):
+            m = result[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                tc_ids = {tc.get("id", "") for tc in m["tool_calls"]}
+                following_ids = set()
+                j = i + 1
+                while j < len(result) and result[j].get("role") == "tool":
+                    following_ids.add(result[j].get("tool_call_id", ""))
+                    j += 1
+                if not tc_ids & following_ids:
+                    logger.debug(f"移除无配对结果的 assistant tool_calls 消息")
+                    cleaned.append({"role": "assistant", "content": m.get("content") or "(tool call removed)"})
+                    i = j
+                    continue
+            cleaned.append(m)
+            i += 1
+
+        return cleaned
 
     @staticmethod
     def _safe_parse_arguments(raw: str) -> dict | None:

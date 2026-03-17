@@ -47,6 +47,7 @@ class BaseLLMProvider(ABC):
     def __init__(self, model: str, api_key: str, **kwargs):
         self.model = model
         self.api_key = api_key
+        self.max_output_tokens: int = 0
 
     @abstractmethod
     async def chat(

@@ -819,10 +819,16 @@ class FeishuChannel(BaseChannel):
             self.agent._tool_timeout = agent_cfg.tool_timeout
             self.agent.max_loops = agent_cfg.max_loops
             self.agent._auto_continue = agent_cfg.auto_continue
+            self.agent._max_tool_result_chars = agent_cfg.max_tool_result_chars
+            from ..skills import registry as _reg
+            _reg.max_result_chars = agent_cfg.max_tool_result_chars
+            for p in self.agent.llm.providers.values():
+                p.max_output_tokens = agent_cfg.max_output_tokens
             max_steps = agent_cfg.max_loops * (1 + agent_cfg.auto_continue)
             reloaded.append(f"Agent: 任务超时={agent_cfg.task_timeout}s, "
                           f"LLM超时={agent_cfg.llm_timeout}s, "
-                          f"单段循环={agent_cfg.max_loops}, 自动续航={agent_cfg.auto_continue}次 (总上限{max_steps}步)")
+                          f"单段循环={agent_cfg.max_loops}, 自动续航={agent_cfg.auto_continue}次 (总上限{max_steps}步), "
+                          f"最大输出={agent_cfg.max_output_tokens}tokens")
 
             # 3. 安全配置
             allowed = new_config.security.get_allowed_paths()

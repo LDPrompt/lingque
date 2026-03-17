@@ -134,6 +134,10 @@ class AgentConfig(BaseSettings):
     max_loops: int = Field(25, alias="AGENT_MAX_LOOPS")
     # 长任务自动续航次数（0=禁用，每次续航自动压缩上下文并继续，总步数=max_loops*(1+auto_continue)）
     auto_continue: int = Field(2, alias="AGENT_AUTO_CONTINUE")
+    # LLM 单次最大输出 token 数（0=不限制，按模型自身上限输出；设正整数则显式限制）
+    max_output_tokens: int = Field(0, alias="AGENT_MAX_OUTPUT_TOKENS")
+    # 工具返回结果最大字符数（0=不限制；默认 15000，防止上下文膨胀）
+    max_tool_result_chars: int = Field(15000, alias="AGENT_MAX_TOOL_RESULT_CHARS")
     # 上下文窗口：最大消息条数和 token 数
     max_context_messages: int = Field(80, alias="AGENT_MAX_CONTEXT_MESSAGES")
     max_context_tokens: int = Field(64000, alias="AGENT_MAX_CONTEXT_TOKENS")

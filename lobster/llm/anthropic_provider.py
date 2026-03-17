@@ -75,7 +75,7 @@ class AnthropicProvider(BaseLLMProvider):
         # 调用 API
         kwargs = {
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": self.max_output_tokens if self.max_output_tokens > 0 else 16384,
             "messages": api_messages,
             "temperature": temperature,
         }

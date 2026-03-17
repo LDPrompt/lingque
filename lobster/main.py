@@ -302,6 +302,9 @@ async def main():
     else:
         set_allowed_paths([str(config.workspace_dir.resolve())])
 
+    # 技能结果截断（与 core.py 共用同一配置）
+    registry.max_result_chars = config.agent.max_tool_result_chars
+
     # 注入邮件/日历配置
     _inject_configs(config)
 

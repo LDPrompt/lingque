@@ -167,7 +167,7 @@ class SkillRegistry:
                     f"(类别: {sorted(needed_cats)})")
         return selected
 
-    MAX_RESULT_CHARS = 16000
+    max_result_chars: int = 0
 
     async def execute_raw(self, name: str, arguments: dict[str, Any]) -> SkillResult:
         """执行技能，返回结构化 SkillResult（推荐工作流引擎使用）"""
@@ -176,6 +176,19 @@ class SkillRegistry:
             return SkillResult(success=False, error=f"未知技能 '{name}'")
 
         try:
+            import inspect
+            sig = inspect.signature(skill.handler)
+            valid_params = set(sig.parameters.keys())
+            has_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if not has_kwargs:
+                filtered = {k: v for k, v in arguments.items() if k in valid_params}
+                if len(filtered) < len(arguments):
+                    dropped = set(arguments) - set(filtered)
+                    logger.warning(f"技能 {name}: 过滤非法参数 {dropped}")
+                arguments = filtered
+
             logger.info(f"执行技能: {name}({arguments})")
             result = await skill.handler(**arguments)
             if not isinstance(result, SkillResult):
@@ -191,10 +204,10 @@ class SkillRegistry:
         """执行技能，返回字符串（兼容旧调用方）"""
         result = await self.execute_raw(name, arguments)
         result_str = str(result)
-        if len(result_str) > self.MAX_RESULT_CHARS:
-            truncated = result_str[:self.MAX_RESULT_CHARS]
+        if self.max_result_chars > 0 and len(result_str) > self.max_result_chars:
+            truncated = result_str[:self.max_result_chars]
             logger.warning(
-                f"技能 {name} 结果过长 ({len(result_str)} 字符)，已截断到 {self.MAX_RESULT_CHARS}"
+                f"技能 {name} 结果过长 ({len(result_str)} 字符)，已截断到 {self.max_result_chars}"
             )
             result_str = truncated + f"\n\n... [结果已截断，原始长度 {len(result_str)} 字符]"
         return result_str

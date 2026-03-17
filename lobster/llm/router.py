@@ -99,7 +99,12 @@ class LLMRouter:
         if not self.providers:
             raise ValueError("至少需要配置一个 LLM Provider 的 API Key!")
 
-        logger.info(f"已初始化 LLM Providers: {list(self.providers.keys())}")
+        agent_cfg = getattr(self.config, "agent", None)
+        max_out = getattr(agent_cfg, "max_output_tokens", 16384) if agent_cfg else 16384
+        for p in self.providers.values():
+            p.max_output_tokens = max_out
+
+        logger.info(f"已初始化 LLM Providers: {list(self.providers.keys())} (max_output_tokens={max_out})")
         logger.info(f"主 Provider: {self.primary}")
 
     def set_session_model(self, session_id: str, provider_name: str) -> bool:

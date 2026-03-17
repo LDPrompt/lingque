@@ -43,7 +43,8 @@ async def stream_anthropic(provider, messages, tools=None, system_prompt="", tem
         else:
             api_messages.append({"role": msg.role, "content": msg.content})
 
-    kwargs = {"model": provider.model, "max_tokens": 4096, "messages": api_messages, "temperature": temperature}
+    _max_out = provider.max_output_tokens if provider.max_output_tokens > 0 else 16384
+    kwargs = {"model": provider.model, "max_tokens": _max_out, "messages": api_messages, "temperature": temperature}
     if system_prompt:
         kwargs["system"] = system_prompt
     if tools:
