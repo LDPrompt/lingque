@@ -2879,7 +2879,7 @@ async def browser_fill_form(fields: list[dict], submit_ref: str = "") -> SkillRe
                 if RPAConfig.enabled:
                     for ch in value:
                         await locator.type(ch, delay=0)
-                        await asyncio.sleep(_get_human_type_delay())
+                        await asyncio.sleep(_get_human_type_delay() / 1000)
                 else:
                     await locator.type(value, delay=20)
                 results.append(f"  {i}. {ref} = \"{value[:20]}\" ✓")

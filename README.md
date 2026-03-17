@@ -6,6 +6,28 @@
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python"></a>
+  <a href="https://github.com/LDPrompt/lingque/stargazers"><img src="https://img.shields.io/github/stars/LDPrompt/lingque?style=social" alt="Stars"></a>
+  <a href="https://github.com/LDPrompt/lingque/network/members"><img src="https://img.shields.io/github/forks/LDPrompt/lingque?style=social" alt="Forks"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/飞书-WebSocket 长连接-00D09C?logo=bytedance&logoColor=white" alt="Feishu">
+  <img src="https://img.shields.io/badge/钉钉-Webhook-0089FF?logo=dingtalk&logoColor=white" alt="DingTalk">
+  <img src="https://img.shields.io/badge/CLI-Terminal-4EAA25?logo=gnubash&logoColor=white" alt="CLI">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white" alt="Playwright">
+  <img src="https://img.shields.io/badge/asyncio-3776AB?logo=python&logoColor=white" alt="asyncio">
+  <img src="https://img.shields.io/badge/ChromaDB-FF6F00?logoColor=white" alt="ChromaDB">
+  <img src="https://img.shields.io/badge/SQLite_FTS5-003B57?logo=sqlite&logoColor=white" alt="SQLite">
+  <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/Pydantic-E92063?logo=pydantic&logoColor=white" alt="Pydantic">
+</p>
+
+<p align="center">
   <a href="#快速开始">快速开始</a> •
   <a href="#功能特性">功能特性</a> •
   <a href="#架构设计">架构设计</a> •
