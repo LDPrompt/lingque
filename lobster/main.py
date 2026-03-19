@@ -443,9 +443,6 @@ async def main():
     skills = registry.list_all()
     logger.info(f"已加载 {len(skills)} 个技能: {[s.name for s in skills]}")
 
-    # 安全配置检查
-    _security_preflight(config, channel_list if args.channel is None else [args.channel])
-
     # 确定要启动的通道
     if args.channel:
         channel_list = [args.channel]
@@ -454,6 +451,9 @@ async def main():
 
     if not channel_list:
         channel_list = ["cli"]
+
+    # 安全配置检查
+    _security_preflight(config, channel_list)
 
     logger.info(f"启动通道: {channel_list}")
 
