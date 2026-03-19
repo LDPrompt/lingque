@@ -41,20 +41,20 @@ import httpx
 class RPAConfig:
     """RPA 风格操作配置（核心目的：绕过反爬检测）"""
     enabled: bool = True                    # 是否启用 RPA 风格
-    mouse_move_duration: float = 0.2        # 鼠标移动时长（秒），不宜太长
-    mouse_steps: int = 15                   # 鼠标移动步数
-    type_delay_min: int = 30                # 输入最小延迟（毫秒）
-    type_delay_max: int = 80                # 输入最大延迟（毫秒）
-    click_delay: float = 0.05               # 点击前停顿（秒）
+    mouse_move_duration: float = 0.15       # 鼠标移动时长（秒）
+    mouse_steps: int = 10                   # 鼠标移动步数
+    type_delay_min: int = 20                # 输入最小延迟（毫秒）
+    type_delay_max: int = 60                # 输入最大延迟（毫秒）
+    click_delay: float = 0.03               # 点击前停顿（秒）
     scroll_smooth: bool = True              # 是否平滑滚动
 
     @classmethod
     def from_env(cls):
         """从环境变量加载配置"""
         cls.enabled = os.environ.get("RPA_MODE", "true").lower() == "true"
-        cls.mouse_move_duration = float(os.environ.get("RPA_MOUSE_DURATION", "0.2"))
-        cls.type_delay_min = int(os.environ.get("RPA_TYPE_DELAY_MIN", "30"))
-        cls.type_delay_max = int(os.environ.get("RPA_TYPE_DELAY_MAX", "80"))
+        cls.mouse_move_duration = float(os.environ.get("RPA_MOUSE_DURATION", "0.15"))
+        cls.type_delay_min = int(os.environ.get("RPA_TYPE_DELAY_MIN", "20"))
+        cls.type_delay_max = int(os.environ.get("RPA_TYPE_DELAY_MAX", "60"))
 
 
 # ==================== RPA 工具函数 ====================
@@ -114,18 +114,12 @@ def _generate_mouse_path(start_x: float, start_y: float, end_x: float, end_y: fl
 
 
 def _get_human_type_delay() -> int:
-    """获取人类化的输入延迟（毫秒）"""
-    # 基础延迟
+    """获取人类化的输入延迟（毫秒），保持自然但不过慢"""
     base_delay = random.randint(RPAConfig.type_delay_min, RPAConfig.type_delay_max)
-    
-    # 偶尔有较长停顿（模拟思考）
-    if random.random() < 0.05:
-        base_delay += random.randint(100, 300)
-    
-    # 偶尔快速连击
-    if random.random() < 0.1:
-        base_delay = max(20, base_delay - 30)
-    
+    if random.random() < 0.03:
+        base_delay += random.randint(60, 150)
+    if random.random() < 0.15:
+        base_delay = max(10, base_delay - 20)
     return base_delay
 
 
@@ -786,88 +780,55 @@ class PlaywrightBrowser:
     async def wait_for_page_ready(self, timeout: float = 15.0) -> str:
         """
         智能等待页面渲染完成。多维度检测，避免截到空白页。
-
-        检测策略（按优先级）:
-        1. 基础DOM加载完成
-        2. 网络空闲（无新请求）
-        3. 页面有实际可见内容（非空白/loading）
-        4. 图片加载进度
-        5. DOM稳定（停止变化）
+        优化版：减少轮询次数和网络空闲等待，提升操作丝滑度。
         """
         if not self._page:
             return "浏览器未启动"
 
         start = time.time()
 
-        # 阶段 1: 等 DOM 加载
+        # 阶段 1: 等 DOM 加载（上限 5s）
         try:
-            await self._page.wait_for_load_state("domcontentloaded", timeout=min(timeout * 1000, 10000))
+            await self._page.wait_for_load_state("domcontentloaded", timeout=min(timeout * 1000, 5000))
         except Exception:
             pass
 
-        # 阶段 2: 尝试等网络空闲（短超时，很多 SPA 永远不会 idle）
+        # 阶段 2: 尝试等网络空闲（短超时，SPA 经常不会 idle，最多 2s）
         try:
-            await self._page.wait_for_load_state("networkidle", timeout=min(timeout * 1000 * 0.4, 6000))
+            await self._page.wait_for_load_state("networkidle", timeout=min(timeout * 1000 * 0.2, 2000))
         except Exception:
             pass
 
-        # 阶段 3: 智能内容检测循环
+        # 阶段 3: 快速内容检测
         check_js = """
         () => {
             const body = document.body;
             if (!body) return { ready: false, reason: 'no_body' };
-
-            const text = (body.innerText || '').trim();
-            const textLen = text.length;
+            const textLen = (body.innerText || '').trim().length;
             const images = document.images;
             const totalImg = images.length;
             let loadedImg = 0;
             for (const img of images) {
                 if (img.complete && img.naturalWidth > 0) loadedImg++;
             }
-
-            // 检测常见的加载指示器
-            const loadingIndicators = document.querySelectorAll(
-                '.loading, .spinner, .skeleton, [class*="loading"], [class*="spinner"], ' +
-                '[class*="skeleton"], [class*="placeholder"], [aria-busy="true"]'
-            );
-            let visibleLoading = 0;
-            for (const el of loadingIndicators) {
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
-                if (rect.width > 10 && rect.height > 10 &&
-                    style.display !== 'none' && style.visibility !== 'hidden') {
-                    visibleLoading++;
-                }
-            }
-
             const hasContent = textLen > 50;
             const imgProgress = totalImg === 0 ? 1.0 : loadedImg / totalImg;
-            const noLoading = visibleLoading === 0;
-
             return {
-                ready: hasContent && imgProgress >= 0.5 && noLoading,
-                textLen,
-                totalImg,
-                loadedImg,
-                imgProgress: Math.round(imgProgress * 100),
-                visibleLoading,
-                reason: !hasContent ? 'no_content' :
-                        imgProgress < 0.5 ? 'images_loading' :
-                        !noLoading ? 'loading_indicator' : 'ok'
+                ready: hasContent && imgProgress >= 0.5,
+                textLen, totalImg, loadedImg,
+                reason: !hasContent ? 'no_content' : imgProgress < 0.5 ? 'images_loading' : 'ok'
             };
         }
         """
 
-        max_checks = 10
-        interval = 0.5
+        max_checks = 5
+        interval = 0.3
         last_state = None
 
         for i in range(max_checks):
             elapsed = time.time() - start
             if elapsed >= timeout:
                 break
-
             try:
                 state = await self._page.evaluate(check_js)
             except Exception:
@@ -877,30 +838,14 @@ class PlaywrightBrowser:
             if state.get("ready"):
                 logger.debug(f"页面就绪: {state['textLen']}字, 图片{state['loadedImg']}/{state['totalImg']}")
                 return "ready"
-
             last_state = state
-
-            # 自适应等待间隔
-            reason = state.get("reason", "")
-            if reason == "no_body" or reason == "no_content":
-                interval = 0.8
-            elif reason == "images_loading":
-                interval = 0.6
-            elif reason == "loading_indicator":
-                interval = 0.5
-            else:
-                interval = 0.4
-
             await asyncio.sleep(interval)
 
-        # 超时了，记录原因
         if last_state:
-            reason = last_state.get("reason", "unknown")
             logger.info(
-                f"页面等待超时({timeout:.1f}s): {reason}, "
+                f"页面等待超时({timeout:.1f}s): {last_state.get('reason', 'unknown')}, "
                 f"文字{last_state.get('textLen', 0)}字, "
-                f"图片{last_state.get('loadedImg', 0)}/{last_state.get('totalImg', 0)}, "
-                f"加载中指示器{last_state.get('visibleLoading', 0)}个"
+                f"图片{last_state.get('loadedImg', 0)}/{last_state.get('totalImg', 0)}"
             )
         return last_state.get("reason", "timeout") if last_state else "timeout"
 
@@ -1620,24 +1565,26 @@ _JS_PAGE_STRUCTURE = """
 """
 
 
-async def _scan_iframes(page, max_elements: int = 20) -> list[dict]:
-    """扫描 iframe 内元素（淘宝/闲鱼登录框通常在 iframe 里）"""
+async def _scan_iframes(page, max_elements: int = 15) -> list[dict]:
+    """扫描 iframe 内元素（淘宝/闲鱼登录框通常在 iframe 里），限时 3s"""
     iframe_elements = []
     try:
         frame_count = len(page.frames)
         if frame_count <= 1:
             return []
 
+        deadline = time.time() + 3.0
         for frame in page.frames[1:]:
-            if len(iframe_elements) >= max_elements:
+            if len(iframe_elements) >= max_elements or time.time() > deadline:
                 break
             try:
                 frame_url = frame.url
                 if not frame_url or frame_url == "about:blank":
                     continue
 
-                # iframe 内始终用 JS 回退扫描
-                elements = await frame.evaluate(_JS_FALLBACK_ELEMENTS)
+                elements = await asyncio.wait_for(
+                    frame.evaluate(_JS_FALLBACK_ELEMENTS), timeout=2.0
+                )
                 if elements:
                     frame_domain = urlparse(frame_url).netloc or "iframe"
                     for el in elements:
@@ -2233,12 +2180,26 @@ class _SharedBrowser:
             cls._ref_map = {}
             cls._last_snapshot_time = 0
 
+    _last_snapshot_info: str = ""
+    _snapshot_url: str = ""
+    SNAPSHOT_CACHE_TTL: float = 1.5
+
     @classmethod
-    async def do_snapshot(cls) -> tuple[str, dict]:
+    async def do_snapshot(cls, force: bool = False) -> tuple[str, dict]:
         browser = await cls.get()
+        now = time.time()
+        current_url = browser._page.url if browser._page else ""
+        if (not force
+                and cls._ref_map
+                and cls._last_snapshot_info
+                and current_url == cls._snapshot_url
+                and (now - cls._last_snapshot_time) < cls.SNAPSHOT_CACHE_TTL):
+            return cls._last_snapshot_info, cls._ref_map
         info, ref_map = await _snapshot_elements(browser)
         cls._ref_map = ref_map
-        cls._last_snapshot_time = time.time()
+        cls._last_snapshot_time = now
+        cls._last_snapshot_info = info
+        cls._snapshot_url = current_url
         return info, ref_map
 
 
@@ -2307,9 +2268,9 @@ async def browser_navigate(url: str) -> SkillResult:
         browser = await _SharedBrowser.get()
         await browser.load_cookies_for_url(url)
         await browser._page.goto(url, wait_until="domcontentloaded")
-        await browser.wait_for_page_ready(timeout=12)
+        await browser.wait_for_page_ready(timeout=8)
 
-        info, _ = await _SharedBrowser.do_snapshot()
+        info, _ = await _SharedBrowser.do_snapshot(force=True)
         return SkillResult(success=True, data=info)
     except Exception as e:
         return SkillResult(success=False, error=f"导航失败: {e}")
@@ -2331,7 +2292,7 @@ async def browser_snapshot() -> SkillResult:
     if not _SharedBrowser.is_active():
         return _not_active_error()
     try:
-        info, _ = await _SharedBrowser.do_snapshot()
+        info, _ = await _SharedBrowser.do_snapshot(force=True)
         return SkillResult(success=True, data=info)
     except Exception as e:
         return SkillResult(success=False, error=f"快照失败: {e}")
@@ -2340,112 +2301,54 @@ async def browser_snapshot() -> SkillResult:
 async def _dismiss_blocking_overlay(browser) -> bool:
     """
     尝试关闭遮挡操作的登录弹窗/遮罩层。
-    
-    策略顺序:
-    1. 查找弹窗内的关闭按钮并点击
-    2. 按 Escape 键
-    3. 用 JS 直接移除遮挡元素
+    优化版：用单次 JS 检测 + 关闭，减少网络往返。
     """
     page = browser._page
     try:
-        overlay_selectors = [
-            '[id*="login-full-panel"]',
-            '[id*="login-panel"]',
-            '[class*="login-full-panel"]',
-            '[class*="loginPanel"]',
-            '[class*="passport-sdk"]',
-            '[id*="passport-sdk"]',
-            '[class*="dy-account"]',
-            'dialog[open]',
-            '[role="dialog"]',
-            '.modal.show',
-            '.ant-modal-wrap:not([style*="display: none"])',
-            '[class*="login-dialog"]',
-            '[class*="login-modal"]',
-            '[class*="SignFlow"]',
-        ]
-
-        close_btn_selectors = [
-            '[class*="close"]', '[aria-label="Close"]', '[aria-label="关闭"]',
-            'button:has(svg)', '.close-btn', '.btn-close',
-            '[class*="icon-close"]', '[class*="iconClose"]',
-            '[class*="semi-icon-close"]',
-            'svg[class*="close"]',
-            '[data-testid*="close"]',
-        ]
-
-        for overlay_sel in overlay_selectors:
-            overlay = await page.query_selector(overlay_sel)
-            if not overlay:
-                continue
-            visible = await overlay.is_visible()
-            if not visible:
-                continue
-
-            for close_sel in close_btn_selectors:
-                try:
-                    close_btn = await overlay.query_selector(close_sel)
-                    if close_btn and await close_btn.is_visible():
-                        await close_btn.click(timeout=3000)
-                        await asyncio.sleep(0.5)
-                        still_there = await page.query_selector(overlay_sel)
-                        if not still_there or not await still_there.is_visible():
-                            return True
-                except Exception:
-                    continue
-
-        try:
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.8)
-
-            for overlay_sel in overlay_selectors[:6]:
-                el = await page.query_selector(overlay_sel)
-                if el and await el.is_visible():
-                    break
-            else:
-                return True
-        except Exception:
-            pass
-
-        removed = await page.evaluate("""() => {
-            const sels = [
+        result = await page.evaluate("""() => {
+            const overlaySels = [
                 '[id*="login-full-panel"]', '[id*="login-panel"]',
-                '[class*="login-full-panel"]', '[class*="passport-sdk"]',
-                '[class*="dy-account"]',
-                '[class*="semi-portal"]',
-                '[class*="semi-modal"]',
-                '[class*="login-guide"]',
-                '.ttp-notify-container',
+                '[class*="login-full-panel"]', '[class*="loginPanel"]',
+                '[class*="passport-sdk"]', '[id*="passport-sdk"]',
+                '[class*="dy-account"]', 'dialog[open]', '[role="dialog"]',
+                '.modal.show', '.ant-modal-wrap:not([style*="display: none"])',
+                '[class*="login-dialog"]', '[class*="login-modal"]', '[class*="SignFlow"]',
             ];
-            let removed = 0;
-            for (const sel of sels) {
-                document.querySelectorAll(sel).forEach(el => {
-                    el.remove();
-                    removed++;
-                });
-            }
-            document.querySelectorAll('[class*="mask"], [class*="overlay"]').forEach(el => {
-                const style = window.getComputedStyle(el);
-                if (style.position === 'fixed' && parseFloat(style.opacity) < 1) {
-                    el.remove();
-                    removed++;
+            const closeSels = [
+                '[class*="close"]', '[aria-label="Close"]', '[aria-label="关闭"]',
+                'button:has(svg)', '.close-btn', '.btn-close',
+                '[class*="icon-close"]', '[class*="iconClose"]',
+            ];
+            for (const oSel of overlaySels) {
+                const overlay = document.querySelector(oSel);
+                if (!overlay) continue;
+                const r = overlay.getBoundingClientRect();
+                const s = window.getComputedStyle(overlay);
+                if (r.width < 50 || r.height < 50 || s.display === 'none' || s.visibility === 'hidden') continue;
+                for (const cSel of closeSels) {
+                    const btn = overlay.querySelector(cSel);
+                    if (btn) { btn.click(); return 'clicked'; }
                 }
+                overlay.remove();
+                return 'removed';
+            }
+            // 清理全屏遮罩
+            let removed = 0;
+            document.querySelectorAll('[class*="mask"], [class*="overlay"]').forEach(el => {
+                const st = window.getComputedStyle(el);
+                if (st.position === 'fixed' && parseFloat(st.opacity) < 1) { el.remove(); removed++; }
             });
             document.querySelectorAll('div[style]').forEach(el => {
-                const style = window.getComputedStyle(el);
-                if (style.position === 'fixed' && style.zIndex > 999 &&
+                const st = window.getComputedStyle(el);
+                if (st.position === 'fixed' && parseInt(st.zIndex) > 999 &&
                     el.offsetWidth >= window.innerWidth * 0.8 &&
-                    el.offsetHeight >= window.innerHeight * 0.8) {
-                    el.remove();
-                    removed++;
-                }
+                    el.offsetHeight >= window.innerHeight * 0.8) { el.remove(); removed++; }
             });
-            return removed;
+            return removed > 0 ? 'removed' : 'none';
         }""")
-        if removed > 0:
+        if result and result != 'none':
             await asyncio.sleep(0.3)
             return True
-
         return False
     except Exception as e:
         logger.debug(f"关闭遮挡弹窗失败: {e}")
@@ -2464,14 +2367,6 @@ async def _action_with_stale_recovery(browser, ref: str, action_fn, action_name:
     4. 仍然失败则尝试文本匹配
     5. 提供智能的错误提示和恢复建议
     """
-    if action_name in ("click", "type", "fill", "select"):
-        try:
-            dismissed = await _dismiss_blocking_overlay(browser)
-            if dismissed:
-                logger.info(f"操作 {action_name} 前主动关闭了遮挡弹窗")
-                await asyncio.sleep(0.3)
-        except Exception:
-            pass
     try:
         return await action_fn(ref, _SharedBrowser._ref_map)
     except Exception as first_err:
@@ -2500,8 +2395,8 @@ async def _action_with_stale_recovery(browser, ref: str, action_fn, action_name:
                 logger.info("未能关闭遮挡弹窗，尝试重新快照恢复")
 
         if need_wait:
-            await asyncio.sleep(1.0)
-            await browser.wait_for_page_ready(timeout=5)
+            await asyncio.sleep(0.5)
+            await browser.wait_for_page_ready(timeout=3)
         
         try:
             _, new_ref_map = await _SharedBrowser.do_snapshot()
@@ -2636,11 +2531,10 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
         
         locator = await _smart_locate(browser._page, r, rmap, "click")
         
-        # v2.0: 操作前确保元素可见且可交互
+        # 快速检查元素可交互
         try:
-            await locator.wait_for(state="visible", timeout=5000)
-            is_enabled = await locator.is_enabled()
-            if not is_enabled:
+            await locator.wait_for(state="visible", timeout=3000)
+            if not await locator.is_enabled():
                 _SharedBrowser.record_action("click", r, "元素禁用", False)
                 return SkillResult(
                     success=False, 
@@ -2649,33 +2543,30 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
         except Exception as e:
             logger.debug(f"等待元素可见超时: {e}")
         
-        # v3.0 RPA: 平滑移动鼠标 + 点击（绕过反爬）
         if rpa_mode and RPAConfig.enabled:
             await browser.rpa_move_mouse_to(locator)
-            await locator.click(timeout=10000)
+            await locator.click(timeout=8000)
         else:
-            await locator.click(timeout=10000)
+            await locator.click(timeout=8000)
         
         if wait_after is not None:
             await asyncio.sleep(wait_after)
-        else:
-            await asyncio.sleep(0.3)
         
         new_url = browser._page.url
         url_changed = new_url != old_url
         
         if url_changed:
-            await browser.wait_for_page_ready(timeout=12)
+            await browser.wait_for_page_ready(timeout=8)
             change_info = f"页面已跳转: {new_url}"
         else:
-            await browser.wait_for_page_ready(timeout=5)
+            await browser.wait_for_page_ready(timeout=3)
             new_title = await browser._page.title()
             if new_title != old_title:
                 change_info = f"页面标题变化: {old_title} → {new_title}"
             else:
                 change_info = "页面内容可能已更新"
 
-        info, _ = await _SharedBrowser.do_snapshot()
+        info, _ = await _SharedBrowser.do_snapshot(force=url_changed)
         
         # v2.0: 记录成功操作
         _SharedBrowser.record_action("click", r, change_info, True)
@@ -2723,16 +2614,12 @@ async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bo
         old_url = browser._page.url
         locator = await _smart_locate(browser._page, r, rmap, "fill")
 
-        # v2.0: 操作前确保输入框可见且可编辑
         try:
-            await locator.wait_for(state="visible", timeout=5000)
-            is_enabled = await locator.is_enabled()
-            is_editable = await locator.is_editable()
-            if not is_enabled or not is_editable:
+            await locator.wait_for(state="visible", timeout=3000)
+            if not await locator.is_editable():
                 return SkillResult(
                     success=False,
-                    error=f"输入框 {r} 当前不可编辑（enabled={is_enabled}, editable={is_editable}）。"
-                          f"可能需要先点击激活，或等待页面加载完成。"
+                    error=f"输入框 {r} 当前不可编辑，可能需要先点击激活或等待页面加载。"
                 )
         except Exception as e:
             logger.debug(f"等待输入框可见超时: {e}")
@@ -2777,14 +2664,15 @@ async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bo
 
         if press_enter:
             await locator.press("Enter")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             new_url = browser._page.url
-            if new_url != old_url:
-                await browser.wait_for_page_ready(timeout=12)
-            else:
+            url_changed = new_url != old_url
+            if url_changed:
                 await browser.wait_for_page_ready(timeout=8)
+            else:
+                await browser.wait_for_page_ready(timeout=3)
 
-        info, _ = await _SharedBrowser.do_snapshot()
+        info, _ = await _SharedBrowser.do_snapshot(force=press_enter)
         
         result_msg = f"✓ 已输入: {text[:50]}{'...' if len(text) > 50 else ''}"
         if press_enter:
@@ -2900,18 +2788,18 @@ async def browser_fill_form(fields: list[dict], submit_ref: str = "") -> SkillRe
                 results.append(f"  {i}. {ref} 填写失败: {_to_ai_friendly_error(e, ref)}")
 
         if submit_ref:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
             try:
                 locator = await _smart_locate(browser._page, submit_ref, _SharedBrowser._ref_map, "click")
                 if RPAConfig.enabled:
                     await browser.rpa_move_mouse_to(locator)
-                await locator.click(timeout=10000)
+                await locator.click(timeout=8000)
                 results.append(f"  已点击提交: {submit_ref} ✓")
-                await browser.wait_for_page_ready(timeout=10)
+                await browser.wait_for_page_ready(timeout=6)
             except Exception as e:
                 results.append(f"  提交点击失败: {_to_ai_friendly_error(e, submit_ref)}")
 
-        info, _ = await _SharedBrowser.do_snapshot()
+        info, _ = await _SharedBrowser.do_snapshot(force=bool(submit_ref))
         return SkillResult(success=True, data="表单填写结果:\n" + "\n".join(results) + f"\n\n{info}")
     except Exception as e:
         return SkillResult(success=False, error=f"表单填写失败: {e}")
