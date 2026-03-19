@@ -22,7 +22,7 @@ class CLIChannel(BaseChannel):
 
     async def start(self):
         console.print("\n[bold cyan]🐦 灵雀 LingQue[/bold cyan] - 你的私人 AI 助手")
-        console.print("[dim]输入消息开始对话, /status 查看状态, /clear 清空会话, /reload 热重载配置, /quit 退出[/dim]\n")
+        console.print("[dim]输入消息开始对话, /help 帮助, /status 状态, /clear 清空, /reload 重载配置, /quit 退出[/dim]\n")
 
         while True:
             try:
@@ -50,6 +50,16 @@ class CLIChannel(BaseChannel):
                 continue
             elif user_input == "/reload":
                 await self._handle_reload()
+                continue
+            elif user_input == "/help":
+                console.print("\n[bold]可用命令[/bold]")
+                console.print("  /help   — 显示帮助")
+                console.print("  /status — 查看会话状态")
+                console.print("  /clear  — 清空会话记忆")
+                console.print("  /model  — 查看/切换模型")
+                console.print("  /reload — 热重载配置")
+                console.print("  /quit   — 退出\n")
+                console.print("[bold]功能[/bold]: 浏览网页、文件操作、代码执行、邮件日历、飞书文档、定时任务、知识图谱、自我学习\n")
                 continue
 
             # 处理消息

@@ -5,10 +5,31 @@
 
 import logging
 import inspect
+import os
 from typing import Any, Callable, Awaitable, Optional
 from dataclasses import dataclass, field
+from datetime import datetime
 
 logger = logging.getLogger("lobster.skills")
+
+_security_logger: logging.Logger | None = None
+
+
+def _get_security_logger() -> logging.Logger:
+    global _security_logger
+    if _security_logger is None:
+        _security_logger = logging.getLogger("lobster.security_audit")
+        _security_logger.setLevel(logging.INFO)
+        if not _security_logger.handlers:
+            log_dir = os.environ.get("MEMORY_DIR", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            fh = logging.FileHandler(
+                os.path.join(log_dir, "security_audit.log"), encoding="utf-8"
+            )
+            fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+            _security_logger.addHandler(fh)
+            _security_logger.propagate = False
+    return _security_logger
 
 
 @dataclass
@@ -189,7 +210,19 @@ class SkillRegistry:
                     logger.warning(f"技能 {name}: 过滤非法参数 {dropped}")
                 arguments = filtered
 
-            logger.info(f"执行技能: {name}({arguments})")
+            _log_args = arguments
+            if name in ("save_credential", "get_credential", "delete_credential"):
+                _log_args = {k: ("***" if k == "value" else v) for k, v in arguments.items()}
+            logger.info(f"执行技能: {name}({_log_args})")
+
+            if skill.risk_level in ("medium", "high"):
+                try:
+                    _get_security_logger().info(
+                        f"EXEC | risk={skill.risk_level} | skill={name} | args={_log_args}"
+                    )
+                except Exception:
+                    pass
+
             result = await skill.handler(**arguments)
             if not isinstance(result, SkillResult):
                 result = SkillResult(success=True, data=str(result))

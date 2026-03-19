@@ -14,6 +14,13 @@ from .registry import registry
 
 _allowed_paths: list[str] = []
 
+_SENSITIVE_PATH_KEYWORDS = (
+    "credentials.json",
+    "cookies" + os.sep,
+    ".chrome_profile" + os.sep,
+    ".env",
+)
+
 
 def set_allowed_paths(paths: list[str]):
     global _allowed_paths
@@ -32,6 +39,12 @@ def _check_path(path: str) -> str:
             f"安全限制: 不允许访问 {abs_path}\n"
             f"允许的目录: {_allowed_paths}"
         )
+    lower = abs_path.lower()
+    for kw in _SENSITIVE_PATH_KEYWORDS:
+        if kw in lower:
+            raise PermissionError(
+                f"安全限制: 该文件受保护，禁止直接读写 ({os.path.basename(abs_path)})"
+            )
     return abs_path
 
 

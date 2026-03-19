@@ -61,13 +61,23 @@ _BROWSER_GUIDE_FULL = """\
 - **抓数据**: 见下方数据抓取指南
 
 ### 数据抓取指南
-1. **API 数据抓取**（最优）:
-   - browser_network_start(url_filter="api") → 操作页面 → browser_network_get(content_type="json")
-   - 电商网站的商品数据走 XHR 接口，直接抓 JSON 最准确
-2. **HTML 提取**（通用）:
-   - browser_extract(selector=".item-card") 或 browser_extract(xpath="...")
-   - browser_extract_table() / browser_extract_links()
-3. 先用网络监听看有没有 API JSON，没有再用选择器提取 HTML"""
+1. **API 数据抓取**（最优，电商首选）:
+   - browser_network_start(url_filter="api") → 操作页面(搜索/翻页/滚动) → browser_network_get(content_type="json")
+   - 淘宝: url_filter="mtop" | 闲鱼: url_filter="mtop.idle" | 京东: url_filter="api.m.jd" | 抖音: url_filter="api"
+2. **滚动采集**（列表/信息流）:
+   - browser_scroll_collect(selector=".item-card", sub_selectors={"title":".title","price":".price"}, scroll_times=5)
+   - 自动边滚边采，适合无限滚动/懒加载页面
+3. **HTML 提取**（通用）:
+   - browser_extract(selector=".goods-item") / browser_extract_table() / browser_extract_links()
+4. **操作策略**: 先用网络监听看有没有 API JSON → 有就直接用 → 没有再用 scroll_collect 或 extract
+5. **元素捕获不全时**: 用 browser_execute_js 检查 DOM 结构确认选择器
+
+### 电商平台常用选择器参考
+- **淘宝**: 商品卡片 `[data-spm] a`, 标题 `.title`, 价格 `.price`, 翻页 `.next`
+- **闲鱼**: 商品卡片 `.item-card`, `.feed-item`, 标题 `.title`, 价格 `.price`
+- **京东**: 列表 `#J_goodsList li[data-sku]`, 标题 `.p-name`, 价格 `.p-price`, 翻页 `.pn-next`
+- **抖音**: 视频/商品卡片 `[data-e2e]`, 用户信息 `.author-card`
+- **通用**: 先 `browser_execute_js("document.querySelectorAll('CSS选择器').length")` 验证选择器"""
 
 _BROWSER_GUIDE_SHORT = "浏览器自动化可用（browser_open 等技能），需要操作网页时可直接使用。"
 

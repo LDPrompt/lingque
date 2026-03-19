@@ -65,6 +65,47 @@ BANNER = r"""
 """
 
 
+def _security_preflight(config, channel_list: list[str]):
+    """启动时安全配置检查，输出警告帮助用户加固"""
+    logger = logging.getLogger("lingque.security")
+    warnings = []
+
+    if "feishu" in channel_list and not config.feishu.allowed_users:
+        warnings.append(
+            "FEISHU_ALLOWED_USERS 未设置 → 所有飞书用户均可访问。"
+            "生产环境请配置用户白名单"
+        )
+
+    if not config.security.require_confirmation:
+        warnings.append(
+            "REQUIRE_CONFIRMATION=false → 高危操作不需要用户确认。"
+            "生产环境建议设为 true"
+        )
+
+    allowed = config.security.allowed_paths
+    if not allowed or allowed == ["."]:
+        warnings.append(
+            "ALLOWED_PATHS 未配置或过于宽泛。"
+            "建议限制为具体的工作目录"
+        )
+
+    if not os.environ.get("DEEPSEEK_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        has_provider = any(
+            k.startswith("LLM_PROVIDER_") for k in os.environ
+        )
+        if not has_provider:
+            warnings.append("未检测到任何 LLM API Key，Agent 将无法正常工作")
+
+    if warnings:
+        logger.warning("=" * 60)
+        logger.warning("安全配置检查发现以下问题:")
+        for i, w in enumerate(warnings, 1):
+            logger.warning(f"  {i}. {w}")
+        logger.warning("=" * 60)
+    else:
+        logger.info("安全配置检查通过")
+
+
 def setup_logging(level: str = "INFO"):
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -401,6 +442,9 @@ async def main():
     # 打印技能
     skills = registry.list_all()
     logger.info(f"已加载 {len(skills)} 个技能: {[s.name for s in skills]}")
+
+    # 安全配置检查
+    _security_preflight(config, channel_list if args.channel is None else [args.channel])
 
     # 确定要启动的通道
     if args.channel:

@@ -682,6 +682,9 @@ class FeishuChannel(BaseChannel):
         if cmd == "/reload":
             await self._handle_reload_command(chat_id)
             return
+        if cmd == "/help":
+            await self._handle_help_command(chat_id)
+            return
 
         # 群聊消息加发送者标识（让 Agent 区分不同用户）
         if chat_type == "group" and sender_id:
@@ -784,6 +787,30 @@ class FeishuChannel(BaseChannel):
             await self._update_card(thinking_id, card)
         except Exception as e:
             logger.warning(f"更新规划卡片失败: {e}")
+
+    async def _handle_help_command(self, chat_id: str):
+        """显示可用命令和功能概览"""
+        help_text = """**可用命令**
+- `/help` — 显示此帮助
+- `/status` — 查看当前会话状态
+- `/clear` — 清空当前会话记忆
+- `/model` — 查看/切换 LLM 模型
+- `/reload` — 热重载配置（无需重启）
+
+**我能做什么**
+- 浏览网页、自动填表登录、采集数据
+- 读写文件、执行代码、管理服务器
+- 收发邮件、管理日历、定时推送
+- 创建飞书文档并分享给团队
+- 记住你的偏好，跨会话保持记忆
+- 从经验中学习，越用越聪明
+
+**使用技巧**
+- 直接用自然语言描述任务即可
+- 复杂任务会自动拆解为多步执行
+- 高危操作会弹出确认卡片
+- 长任务自动续航，无需手动说"继续\""""
+        await self.send_card(chat_id, "🐦 灵雀帮助", help_text)
 
     async def _handle_reload_command(self, chat_id: str):
         """热重载 .env 配置，无需重启服务"""

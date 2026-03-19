@@ -1339,12 +1339,16 @@ def _parse_aria_snapshot(yaml_text: str, max_elements: int = 50) -> tuple[list[d
 # JS 回退扫描（当 aria_snapshot 不可用时）
 _JS_FALLBACK_ELEMENTS = """
 () => {
+    const MAX = 150;
     const results = [];
     const seen = new Set();
+
     const SELECTOR = 'a[href], button, input:not([type="hidden"]), select, textarea, ' +
         '[role="button"], [role="link"], [role="tab"], [role="menuitem"], ' +
-        '[role="checkbox"], [role="radio"], [role="switch"], ' +
-        '[contenteditable="true"], details > summary';
+        '[role="checkbox"], [role="radio"], [role="switch"], [role="option"], ' +
+        '[contenteditable="true"], details > summary, ' +
+        '[onclick], [tabindex]:not([tabindex="-1"]), ' +
+        '[data-spm], [data-click], [data-e2e], [data-testid], [data-sku]';
 
     const dialogSelectors = [
         'dialog[open]', '[role="dialog"]', '[role="alertdialog"]',
@@ -1381,13 +1385,14 @@ _JS_FALLBACK_ELEMENTS = """
     }
 
     function processElement(el, inDialog) {
-        if (results.length >= 60) return;
+        if (results.length >= MAX) return;
         const rect = el.getBoundingClientRect();
         if (rect.width < 2 || rect.height < 2) return;
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
         const tag = el.tagName.toLowerCase();
-        const text = (el.innerText || el.textContent || '').trim().slice(0, 60).replace(/\\n/g, ' ');
+        if (tag === 'html' || tag === 'body' || tag === 'head') return;
+        const text = (el.innerText || el.textContent || '').trim().slice(0, 80).replace(/\\n/g, ' ');
         const placeholder = el.placeholder || '';
         const ariaLabel = el.getAttribute('aria-label') || '';
         const type = el.type || '';
@@ -1416,11 +1421,32 @@ _JS_FALLBACK_ELEMENTS = """
         else if (tag === 'textarea') { role = 'textbox'; label = placeholder || ariaLabel || elName; }
         else if (tag === 'select') { role = 'combobox'; label = ariaLabel || elName; }
         else if (el.getAttribute('contenteditable') === 'true') { role = 'textbox'; label = ariaLabel || text.slice(0, 30) || 'editor'; }
-        else { role = el.getAttribute('role') || tag; label = text || ariaLabel; }
+        else {
+            role = el.getAttribute('role') || '';
+            label = text || ariaLabel;
+            if (!role) {
+                const hasClick = el.hasAttribute('onclick') || el.hasAttribute('data-click') || el.hasAttribute('data-spm');
+                const cursorPointer = style.cursor === 'pointer';
+                if (hasClick || cursorPointer) {
+                    role = 'button';
+                    if (!label) {
+                        const img = el.querySelector('img');
+                        if (img) label = img.alt || img.title || '(图片按钮)';
+                    }
+                } else if (el.hasAttribute('tabindex')) {
+                    role = 'button';
+                } else {
+                    return;
+                }
+            }
+        }
         if (!label) return;
 
         let sel;
         if (id) sel = '#' + CSS.escape(id);
+        else if (el.getAttribute('data-sku')) sel = '[data-sku="' + el.getAttribute('data-sku') + '"]';
+        else if (el.getAttribute('data-e2e')) sel = '[data-e2e="' + el.getAttribute('data-e2e') + '"]';
+        else if (el.getAttribute('data-testid')) sel = '[data-testid="' + el.getAttribute('data-testid') + '"]';
         else if (elName && tag !== 'a') sel = tag + '[name="' + elName + '"]';
         else if (placeholder) sel = tag + '[placeholder="' + placeholder + '"]';
         else if (ariaLabel) sel = tag + '[aria-label="' + ariaLabel + '"]';
@@ -1452,7 +1478,7 @@ _JS_FALLBACK_ELEMENTS = """
 
     if (dialogRoot) { scanTree(dialogRoot, true); }
 
-    // 扫描展开的下拉面板（自定义下拉框的选项通常在 body 下的浮层中）
+    // 扫描展开的下拉面板
     const dropdownSelectors = [
         '.ant-select-dropdown:not([style*="display: none"])',
         '.el-select-dropdown:not([style*="display: none"])',
@@ -1470,7 +1496,7 @@ _JS_FALLBACK_ELEMENTS = """
                 if (rect.width < 10 || rect.height < 10) continue;
                 const items = panel.querySelectorAll('[role="option"], li, .ant-select-item, .el-select-dropdown__item, [class*="option"]');
                 for (const item of items) {
-                    if (results.length >= 60) break;
+                    if (results.length >= MAX) break;
                     const text = (item.innerText || item.textContent || '').trim().slice(0, 60);
                     if (!text) continue;
                     const key = 'option|' + text;
@@ -1488,6 +1514,41 @@ _JS_FALLBACK_ELEMENTS = """
     }
 
     scanTree(document, false);
+
+    // 兜底：扫描 cursor:pointer 的可见 div/span（电商平台大量使用）
+    if (results.length < 30) {
+        const candidates = document.querySelectorAll('div, span, li, img');
+        for (const el of candidates) {
+            if (results.length >= MAX) break;
+            try {
+                const st = window.getComputedStyle(el);
+                if (st.cursor !== 'pointer') continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 20 || r.height < 15 || r.bottom < 0 || r.top > window.innerHeight) continue;
+                if (st.display === 'none' || st.visibility === 'hidden') continue;
+                if (el.closest('a, button, input, select, textarea')) continue;
+                const txt = (el.innerText || el.textContent || '').trim().slice(0, 60).replace(/\\n/g, ' ');
+                const aria = el.getAttribute('aria-label') || '';
+                const alt = el.alt || el.title || '';
+                const lbl = txt || aria || alt;
+                if (!lbl || lbl.length < 2) continue;
+                const key = 'button|' + lbl;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                let css = '';
+                if (el.id) css = '#' + CSS.escape(el.id);
+                else if (el.className && typeof el.className === 'string') {
+                    const cls = el.className.trim().split(/\\s+/)[0];
+                    if (cls && cls.length < 60) css = '.' + CSS.escape(cls);
+                }
+                results.push({
+                    role: 'button', name: lbl.slice(0, 80), value: '', css: css,
+                    disabled: false, checked: false, required: false, in_dialog: false,
+                });
+            } catch(e) {}
+        }
+    }
+
     return results;
 }
 """
@@ -1602,7 +1663,7 @@ async def _scan_iframes(page, max_elements: int = 15) -> list[dict]:
     return iframe_elements
 
 
-async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 50) -> tuple[str, dict]:
+async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80) -> tuple[str, dict]:
     """
     增强版页面快照。优先使用 aria_snapshot，不可用时回退 JS 扫描。
 
@@ -4856,6 +4917,138 @@ async def browser_extract_links(selector: str = "", max_count: int = 30) -> Skil
         return SkillResult(success=True, data="\n".join(lines))
     except Exception as e:
         return SkillResult(success=False, error=f"链接提取失败: {e}")
+
+
+@register(
+    name="browser_scroll_collect",
+    description=(
+        "边滚动页面边采集数据——专为无限滚动/懒加载/电商列表设计。\n"
+        "自动滚动页面，每次滚动后用 CSS 选择器提取新出现的数据项。\n"
+        "适合：淘宝/闲鱼/京东/抖音的商品列表、搜索结果、信息流等。\n"
+        "示例: selector='.item-card' attrs=['title', 'price'] scroll_times=5\n"
+        "如果不确定选择器，先用 browser_execute_js 检查页面结构。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "selector": {
+                "type": "string",
+                "description": "数据项的 CSS 选择器（如 '.item-card', '.goods-item', 'li[data-sku]'）",
+            },
+            "sub_selectors": {
+                "type": "object",
+                "description": "子元素选择器映射，提取每个卡片内的字段。如 {\"title\": \".title\", \"price\": \".price\", \"link\": \"a@href\"}。键名后加 @attr 提取属性而非文字",
+            },
+            "scroll_times": {
+                "type": "integer",
+                "description": "滚动次数（默认 5，每次约一屏高度）",
+            },
+            "scroll_delay": {
+                "type": "number",
+                "description": "每次滚动后等待秒数（默认 1.5，慢网站可加大）",
+            },
+            "max_items": {
+                "type": "integer",
+                "description": "最多采集多少条（默认 100）",
+            },
+        },
+        "required": ["selector"],
+    },
+    risk_level="low",
+)
+async def browser_scroll_collect(
+    selector: str,
+    sub_selectors: dict = None,
+    scroll_times: int = 5,
+    scroll_delay: float = 1.5,
+    max_items: int = 100,
+) -> SkillResult:
+    if not _SharedBrowser.is_active():
+        return _not_active_error()
+    try:
+        browser = await _SharedBrowser.get()
+        page = browser._page
+
+        js_collect = """
+        ({selector, subSelectors, seenTexts, maxItems}) => {
+            const items = document.querySelectorAll(selector);
+            const results = [];
+            for (const el of items) {
+                if (results.length >= maxItems) break;
+                const fingerprint = (el.innerText || '').trim().slice(0, 100);
+                if (!fingerprint || seenTexts.includes(fingerprint)) continue;
+
+                if (subSelectors && Object.keys(subSelectors).length > 0) {
+                    const row = {};
+                    for (const [key, subSel] of Object.entries(subSelectors)) {
+                        let attrName = null;
+                        let actualSel = subSel;
+                        if (subSel.includes('@')) {
+                            const parts = subSel.split('@');
+                            actualSel = parts[0];
+                            attrName = parts[1];
+                        }
+                        const sub = actualSel ? el.querySelector(actualSel) : el;
+                        if (sub) {
+                            row[key] = attrName ? (sub.getAttribute(attrName) || '') : (sub.innerText || sub.textContent || '').trim().slice(0, 200);
+                        } else {
+                            row[key] = '';
+                        }
+                    }
+                    row['_fp'] = fingerprint;
+                    results.push(row);
+                } else {
+                    results.push({text: fingerprint, _fp: fingerprint});
+                }
+            }
+            return results;
+        }
+        """
+
+        all_items = []
+        seen_texts = []
+
+        for i in range(scroll_times + 1):
+            batch = await page.evaluate(
+                js_collect,
+                {
+                    "selector": selector,
+                    "subSelectors": sub_selectors or {},
+                    "seenTexts": seen_texts,
+                    "maxItems": max_items - len(all_items),
+                },
+            )
+            for item in batch:
+                fp = item.pop("_fp", "")
+                if fp:
+                    seen_texts.append(fp)
+                all_items.append(item)
+
+            if len(all_items) >= max_items:
+                break
+
+            if i < scroll_times:
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
+                await asyncio.sleep(scroll_delay)
+
+        if not all_items:
+            return SkillResult(
+                success=True,
+                data=f"未找到匹配 `{selector}` 的数据项。\n"
+                     f"建议先用 browser_execute_js('document.querySelectorAll(\"...\").length') 确认选择器是否正确。"
+            )
+
+        lines = [f"采集到 {len(all_items)} 条数据（滚动 {scroll_times} 次）:\n"]
+        for idx, item in enumerate(all_items[:max_items], 1):
+            if sub_selectors:
+                fields = " | ".join(f"{k}={v}" for k, v in item.items() if v)
+                lines.append(f"  {idx}. {fields}")
+            else:
+                lines.append(f"  {idx}. {item.get('text', '')}")
+
+        return SkillResult(success=True, data="\n".join(lines))
+    except Exception as e:
+        return SkillResult(success=False, error=f"滚动采集失败: {e}")
 
 
 # ==================== 视觉理解 ====================
