@@ -12,6 +12,13 @@ from .knowledge_graph import (
     get_knowledge_graph,
     init_knowledge_graph,
 )
+from .user_profile import (
+    UserProfile,
+    UserProfileManager,
+    get_profile_manager,
+    init_profile_manager,
+    detect_emotion,
+)
 
 __all__ = [
     "VectorMemory",
@@ -22,4 +29,9 @@ __all__ = [
     "Relation",
     "get_knowledge_graph",
     "init_knowledge_graph",
+    "UserProfile",
+    "UserProfileManager",
+    "get_profile_manager",
+    "init_profile_manager",
+    "detect_emotion",
 ]

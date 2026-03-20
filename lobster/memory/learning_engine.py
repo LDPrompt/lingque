@@ -27,10 +27,15 @@ _engine: Optional["LearningEngine"] = None
 
 class LearningEngine:
     FEEDBACK_POSITIVE = re.compile(
-        r"^(很好|对了|完美|不错|厉害|可以|感谢|谢谢|正确|没错|棒|好的|对的|太好了|非常好)",
+        r"(很好|对了|完美|不错|厉害|可以|感谢|谢谢|正确|没错|棒|好的|对的|太好了|非常好"
+        r"|成功了|搞定|解决了|生效了|通了|跑起来|nice|great|awesome|ok|OK|可行)",
     )
     FEEDBACK_NEGATIVE = re.compile(
-        r"^(不对|错了|不是|重来|别这样|不行|不要|搞错|有问题|有bug|不好用|不太对)",
+        r"(不对|错了|不是|重来|别这样|不行|不要|搞错|有问题|有bug|不好用|不太对"
+        r"|又出|还是不|怎么又|不好使|崩了|报错|失败|不生效|不管用|有毛病|废了)",
+    )
+    FEEDBACK_CORRECTION = re.compile(
+        r"(我说的是|不是这个意思|我的意思|应该是|你理解错了|搞错了|我是说|你搞反了)",
     )
 
     def __init__(self, workspace_dir: str | Path):
@@ -184,16 +189,34 @@ class LearningEngine:
         last_user_msg: str = "",
         last_assistant_msg: str = "",
     ) -> Optional[str]:
-        """检测用户反馈信号，有则记录并返回情感标签"""
+        """检测用户反馈信号（正面/负面/纠正），记录并返回情感标签"""
         text = user_message.strip()
-        if len(text) > 50:
+        if len(text) > 80:
             return None
 
         sentiment = None
-        if self.FEEDBACK_POSITIVE.search(text):
-            sentiment = "positive"
+        sub_category = "general"
+
+        if self.FEEDBACK_CORRECTION.search(text):
+            sentiment = "correction"
+            sub_category = "misunderstanding"
         elif self.FEEDBACK_NEGATIVE.search(text):
             sentiment = "negative"
+        elif self.FEEDBACK_POSITIVE.search(text):
+            sentiment = "positive"
+
+        if not sentiment:
+            try:
+                from .user_profile import detect_emotion
+                emotion, conf = detect_emotion(text)
+                if conf >= 0.5:
+                    if emotion in ("happy", "excited"):
+                        sentiment = "positive"
+                    elif emotion in ("frustrated", "anxious"):
+                        sentiment = "negative"
+                        sub_category = emotion
+            except Exception:
+                pass
 
         if not sentiment:
             return None
@@ -207,12 +230,13 @@ class LearningEngine:
         entry = {
             "type": "user_feedback",
             "sentiment": sentiment,
+            "sub_category": sub_category,
             "feedback_text": text[:100],
             "context": context[:300],
             "category": "user_feedback",
         }
         self.record(entry)
-        logger.info(f"用户反馈: {sentiment} — {text[:30]}")
+        logger.info(f"用户反馈: {sentiment}/{sub_category} — {text[:30]}")
         return sentiment
 
     # ==================== 模块 4: 工具策略统计 ====================

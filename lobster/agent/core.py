@@ -66,6 +66,24 @@ def _get_learning_engine():
     except Exception:
         return None
 
+
+def _get_profile_manager():
+    """延迟获取 UserProfileManager"""
+    try:
+        from ..memory.user_profile import get_profile_manager
+        return get_profile_manager()
+    except Exception:
+        return None
+
+
+def _get_knowledge_graph():
+    """延迟获取 KnowledgeGraph"""
+    try:
+        from ..memory.knowledge_graph import get_knowledge_graph
+        return get_knowledge_graph()
+    except Exception:
+        return None
+
 logger = logging.getLogger("lobster.agent")
 
 STUCK_LOOP_WINDOW = 12
@@ -509,6 +527,16 @@ class Agent:
                               if m.role == "assistant" and m.content), "")
             le.detect_and_record_feedback(user_input, last_user, last_asst)
 
+        # === 用户画像: 情绪检测 + 轻量画像更新 ===
+        pm = _get_profile_manager()
+        user_id = self.memory._current_user_id or "default"
+        if pm and user_id != "default":
+            try:
+                pm.update_mood(user_id, user_input)
+                pm.update_from_message(user_id, user_input)
+            except Exception as e:
+                logger.debug(f"用户画像更新跳过: {e}")
+
         long_term = self.memory.load_long_term()
         daily_notes = self.memory.load_recent_daily_notes(days=2)
 
@@ -872,6 +900,9 @@ class Agent:
         # === 自我进化: 任务后反思 ===
         await self._post_task_reflect(user_input, system_prompt)
 
+        # === 用户画像: 任务统计 + 里程碑 + 知识图谱抽取 ===
+        await self._post_task_profile_update(user_input, final_response)
+
         # === 最终输出脱敏: 防止 LLM 回复中泄露密钥 ===
         from .memory import redact_secrets
         final_response = redact_secrets(final_response)
@@ -955,6 +986,58 @@ class Agent:
                 le.record_reflection(task_summary, tools_used, rs.error_count)
         except Exception as e:
             logger.debug(f"任务反思异常: {e}")
+
+    async def _post_task_profile_update(self, user_input: str, final_response: str) -> None:
+        """任务结束后更新用户画像: 任务统计、里程碑、知识图谱抽取"""
+        user_id = self.memory._current_user_id or "default"
+        if user_id == "default":
+            return
+
+        rs = self._rs()
+
+        # 1) 任务统计
+        pm = _get_profile_manager()
+        if pm:
+            try:
+                category = "general"
+                if rs.tools_used_set:
+                    cats = Counter(_get_tool_category(t) for t in rs.tools_used_set)
+                    category = cats.most_common(1)[0][0] if cats else "general"
+                pm.record_task(user_id, category)
+
+                new_ms = pm.check_milestones(user_id)
+                if new_ms:
+                    logger.info(f"用户 {user_id} 达成新里程碑: {[m.title for m in new_ms]}")
+            except Exception as e:
+                logger.debug(f"用户画像任务统计失败: {e}")
+
+        # 2) 知识图谱: 异步抽取实体关系（仅在有实质内容时）
+        kg = _get_knowledge_graph()
+        if kg and len(user_input) > 15 and rs.total_tool_calls <= 5:
+            try:
+                combined = f"用户说: {user_input[:500]}"
+                if final_response:
+                    combined += f"\nAI回复: {final_response[:300]}"
+                await kg.extract_from_text_async(combined, auto_add=True, use_llm=False)
+            except Exception as e:
+                logger.debug(f"知识图谱抽取跳过: {e}")
+
+        # 3) 自动记忆提取: 对实质性对话用 LLM 提取用户偏好/事实
+        if rs.total_tool_calls >= 3 and len(self.memory.messages) >= 6:
+            try:
+                from ..memory.auto_extract import MemoryExtractor
+                extractor = MemoryExtractor(self.llm, self.memory.memory_dir)
+                recent = self.memory.messages[-10:]
+                conv_text = "\n".join(
+                    f"{m.role}: {(m.content or '')[:200]}" for m in recent if m.content
+                )
+                if len(conv_text) > 80:
+                    memories = await extractor.extract(conv_text)
+                    if memories:
+                        await extractor.save(memories)
+                        logger.info(f"自动记忆提取: 保存 {len(memories)} 条")
+            except Exception as e:
+                logger.debug(f"自动记忆提取跳过: {e}")
 
     async def _auto_recall(self, user_input: str) -> str:
         """自动记忆召回：用用户消息搜索向量库，找到相关记忆注入上下文"""

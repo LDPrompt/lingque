@@ -439,6 +439,14 @@ async def main():
     except Exception as e:
         logger.warning(f"知识图谱初始化失败: {e}")
 
+    # P2: 用户画像管理器
+    try:
+        from .memory.user_profile import init_profile_manager
+        init_profile_manager(config.memory_dir)
+        logger.info("👤 用户画像管理器已初始化")
+    except Exception as e:
+        logger.warning(f"用户画像管理器初始化失败: {e}")
+
     # 打印技能
     skills = registry.list_all()
     logger.info(f"已加载 {len(skills)} 个技能: {[s.name for s in skills]}")

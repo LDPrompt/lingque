@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "LingQue Browser Helper",
+  "version": "1.0.0",
+  "description": "AI Agent 浏览器自动化增强 — 深度 DOM 分析、多策略选择器、相似元素查找",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "world": "MAIN",
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [],
+  "host_permissions": ["<all_urls>"]
+}

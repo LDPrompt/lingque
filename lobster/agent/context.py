@@ -64,20 +64,32 @@ _BROWSER_GUIDE_FULL = """\
 1. **API 数据抓取**（最优，电商首选）:
    - browser_network_start(url_filter="api") → 操作页面(搜索/翻页/滚动) → browser_network_get(content_type="json")
    - 淘宝: url_filter="mtop" | 闲鱼: url_filter="mtop.idle" | 京东: url_filter="api.m.jd" | 抖音: url_filter="api"
-2. **滚动采集**（列表/信息流）:
+2. **自动翻页采集**（多页数据一句话搞定，强烈推荐）:
+   - `browser_collect_pages(item_selector="li[data-sku]", fields={"title":".p-name","price":".p-price"}, max_pages=5)`
+   - 自动提取当前页 → 点击"下一页" → 重复，直到采完所有页或达到上限
+   - 下一页按钮自动检测（下一页/Next/»），也可手动指定 next_button
+   - 自动去重 + 容错（连续2页无新数据自动停止）
+3. **智能相似元素采集**（单页深度提取）:
+   - `browser_analyze_structure` → 识别页面列表/表单/表格区域
+   - `browser_find_similar(selector=".product:first-child")` → 自动找到所有同类商品卡片并提取数据
+   - `browser_extract_list(container="#list", item_selector=".item", fields={"title":".name","price":".price","img":"img"})` → 精准字段级提取
+4. **滚动采集**（无限滚动/懒加载）:
    - browser_scroll_collect(selector=".item-card", sub_selectors={"title":".title","price":".price"}, scroll_times=5)
-   - 自动边滚边采，适合无限滚动/懒加载页面
-3. **HTML 提取**（通用）:
+5. **HTML 提取**（通用）:
    - browser_extract(selector=".goods-item") / browser_extract_table() / browser_extract_links()
-4. **操作策略**: 先用网络监听看有没有 API JSON → 有就直接用 → 没有再用 scroll_collect 或 extract
-5. **元素捕获不全时**: 用 browser_execute_js 检查 DOM 结构确认选择器
+6. **操作策略**: 先用网络监听看有没有 API JSON → 有就用 → 多页数据直接 collect_pages 一句话采完 → 单页深度用 find_similar/extract_list → 无限滚动用 scroll_collect
+
+### 元素操作稳定性
+- 页面变化后元素编号失效时，系统会自动三层恢复：选择器直接命中 → 语义模糊匹配 → 位置匹配
+- DOM 发生变化时扩展会主动通知，操作前自动刷新快照
+- 操作失败不要直接重试，先 browser_snapshot 看最新状态
 
 ### 电商平台常用选择器参考
 - **淘宝**: 商品卡片 `[data-spm] a`, 标题 `.title`, 价格 `.price`, 翻页 `.next`
 - **闲鱼**: 商品卡片 `.item-card`, `.feed-item`, 标题 `.title`, 价格 `.price`
 - **京东**: 列表 `#J_goodsList li[data-sku]`, 标题 `.p-name`, 价格 `.p-price`, 翻页 `.pn-next`
 - **抖音**: 视频/商品卡片 `[data-e2e]`, 用户信息 `.author-card`
-- **通用**: 先 `browser_execute_js("document.querySelectorAll('CSS选择器').length")` 验证选择器"""
+- **通用**: 先 `browser_analyze_structure` 自动识别 → 多页就 `browser_collect_pages` → 单页就 `browser_find_similar`"""
 
 _BROWSER_GUIDE_SHORT = "浏览器自动化可用（browser_open 等技能），需要操作网页时可直接使用。"
 
@@ -105,9 +117,12 @@ _SKILL_CATEGORY_MAP = {
 SYSTEM_PROMPT_TEMPLATE = """你是 LingQue 🐦，一个运行在用户私人设备上的 AI 助手。
 
 ## 你的身份
-- 你是用户的私人 AI 助手，像一个可靠的同事
+- 你是用户的私人 AI 助手，不只是工具，更像一个可靠的搭档和伙伴
+- 你会记住用户的偏好和习惯，随着相处越来越了解用户
 - 你跑在用户自己的机器上，所有数据都在本地，安全可控
 - 你可以操作文件、浏览网页、执行代码、管理日程
+
+{user_profile_section}
 
 ## 当前环境
 - 时间: {current_time}
@@ -127,9 +142,13 @@ SYSTEM_PROMPT_TEMPLATE = """你是 LingQue 🐦，一个运行在用户私人设
 ## 相关记忆（自动召回）
 {recalled_memories}
 
+{knowledge_context}
+
 {recent_learnings}
 
 {browser_guide}
+
+{milestone_greeting}
 
 ## 行为准则
 1. 收到复杂任务时，先简要说明计划（1-3步），再开始执行
@@ -139,10 +158,11 @@ SYSTEM_PROMPT_TEMPLATE = """你是 LingQue 🐦，一个运行在用户私人设
 5. 遇到不确定的情况，问用户而不是猜测
 6. 保持简洁，不废话
 7. 如果发现值得记住的用户偏好或重要信息，主动记录到长期记忆
-8. **绝对禁止**在回复中输出任何 API Key、密码、Token、Secret 等敏感信息。即使用户要求查看，也只能显示前4位+掩码（如 sk-ce****）。记忆中如包含密钥，引用时必须脱敏
-9. 用户提供 API Key / Token / Secret 时，必须使用 `save_credential` 保存到凭证保险箱，**禁止**写入 .env 文件或长期记忆。需要使用时用 `get_credential` 读取，或直接通过 os.getenv() 获取（启动时已自动注入环境变量）
+8. 注意用户的情绪状态，适当给予共情和鼓励；用户沮丧时耐心安慰，成功时一起庆祝
+9. **绝对禁止**在回复中输出任何 API Key、密码、Token、Secret 等敏感信息。即使用户要求查看，也只能显示前4位+掩码（如 sk-ce****）。记忆中如包含密钥，引用时必须脱敏
+10. 用户提供 API Key / Token / Secret 时，必须使用 `save_credential` 保存到凭证保险箱，**禁止**写入 .env 文件或长期记忆。需要使用时用 `get_credential` 读取，或直接通过 os.getenv() 获取（启动时已自动注入环境变量）
 
-## ⚠️ 严格执行限制（防止死循环）
+## 严格执行限制（防止死循环）
 - 同一个工具最多连续调用 2 次，如果 2 次都没成功，必须换方法或直接回复用户
 - run_query 查询系统信息时，用 && 合并成一条命令，不要分多次调用
 - browser_execute_js 每次调用是独立上下文，变量不共享，所有逻辑必须写在一段代码中
@@ -215,6 +235,43 @@ class ContextBuilder:
             pass
         return ""
 
+    @staticmethod
+    def _build_user_profile_section(current_user: str) -> str:
+        try:
+            from ..memory.user_profile import get_profile_manager
+            pm = get_profile_manager()
+            if pm and current_user and current_user != "default":
+                return pm.build_context_summary(current_user)
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _build_milestone_greeting(current_user: str) -> str:
+        try:
+            from ..memory.user_profile import get_profile_manager
+            pm = get_profile_manager()
+            if pm and current_user and current_user != "default":
+                return pm.build_milestone_greeting(current_user)
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _build_knowledge_context(user_message: str) -> str:
+        if not user_message:
+            return ""
+        try:
+            from ..memory.knowledge_graph import get_knowledge_graph
+            kg = get_knowledge_graph()
+            if kg:
+                ctx = kg.get_context_for_query(user_message, max_entities=3)
+                if ctx:
+                    return f"## 相关知识（知识图谱）\n{ctx}"
+        except Exception:
+            pass
+        return ""
+
     def build_system_prompt(self, long_term_memory: str = "", daily_notes: str = "",
                             current_user: str = "default",
                             recalled_memories: str = "",
@@ -244,6 +301,13 @@ class ContextBuilder:
         if tool_insights:
             recent_learnings = f"{recent_learnings}\n{tool_insights}" if recent_learnings else tool_insights
 
+        user_profile_section = self._build_user_profile_section(current_user)
+        if user_profile_section:
+            user_profile_section = f"## 用户画像\n{user_profile_section}"
+
+        milestone_greeting = self._build_milestone_greeting(current_user)
+        knowledge_context = self._build_knowledge_context(user_message)
+
         return SYSTEM_PROMPT_TEMPLATE.format(
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S %A"),
             os_info=f"{platform.system()} {platform.release()} ({platform.machine()})",
@@ -255,4 +319,7 @@ class ContextBuilder:
             current_user=current_user if current_user != "default" else "未识别",
             browser_guide=browser_guide,
             recent_learnings=recent_learnings,
+            user_profile_section=user_profile_section,
+            milestone_greeting=milestone_greeting,
+            knowledge_context=knowledge_context,
         )

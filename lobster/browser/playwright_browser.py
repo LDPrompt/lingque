@@ -471,6 +471,17 @@ _STEALTH_JS = """
 """
 
 
+# ==================== 扩展 JS 注入（远程 CDP 场景兜底） ====================
+
+_EXTENSION_JS: str = ""
+_ext_js_path = Path(__file__).parent / "extension" / "content.js"
+if _ext_js_path.exists():
+    try:
+        _EXTENSION_JS = _ext_js_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+
+
 # ==================== 字体 CDN 拦截（防止外部字体加载超时导致截图失败） ====================
 
 _BLOCKED_FONT_DOMAINS = (
@@ -619,6 +630,14 @@ class PlaywrightBrowser:
             "--lang=zh-CN",
             f"--window-size={self.viewport['width']},{self.viewport['height']}",
         ]
+
+        ext_dir = Path(__file__).parent / "extension"
+        if ext_dir.is_dir() and (ext_dir / "manifest.json").exists():
+            ext_path = str(ext_dir.resolve())
+            args.append(f"--load-extension={ext_path}")
+            args.append(f"--disable-extensions-except={ext_path}")
+            logger.info(f"自动加载浏览器扩展: {ext_path}")
+
         if self.headless:
             args.append("--headless=new")
         args.append("about:blank")
@@ -666,6 +685,8 @@ class PlaywrightBrowser:
             )
 
         await self._context.add_init_script(_STEALTH_JS)
+        if _EXTENSION_JS:
+            await self._context.add_init_script(_EXTENSION_JS)
         await _setup_font_blocking(self._context)
 
         if self._context.pages:
@@ -677,6 +698,11 @@ class PlaywrightBrowser:
             await self._page.evaluate(_STEALTH_JS)
         except Exception:
             pass
+        if _EXTENSION_JS:
+            try:
+                await self._page.evaluate(_EXTENSION_JS)
+            except Exception:
+                pass
 
         self._page.set_default_timeout(self.timeout)
         self._using_cdp = True
@@ -684,16 +710,25 @@ class PlaywrightBrowser:
 
     async def _start_builtin(self):
         """回退：使用 Playwright 内置 Chromium（兼容旧行为）"""
+        launch_args = [
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            f"--window-size={self.viewport['width']},{self.viewport['height']}",
+        ]
+
+        ext_dir = Path(__file__).parent / "extension"
+        if ext_dir.is_dir() and (ext_dir / "manifest.json").exists():
+            ext_path = str(ext_dir.resolve())
+            launch_args.append(f"--load-extension={ext_path}")
+            launch_args.append(f"--disable-extensions-except={ext_path}")
+            logger.info(f"自动加载浏览器扩展: {ext_path}")
+
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                f"--window-size={self.viewport['width']},{self.viewport['height']}",
-            ],
+            args=launch_args,
         )
         self._context = await self._browser.new_context(
             viewport=self.viewport,
@@ -708,6 +743,8 @@ class PlaywrightBrowser:
         )
 
         await self._context.add_init_script(_STEALTH_JS)
+        if _EXTENSION_JS:
+            await self._context.add_init_script(_EXTENSION_JS)
         await _setup_font_blocking(self._context)
 
         self._page = await self._context.new_page()
@@ -1663,14 +1700,140 @@ async def _scan_iframes(page, max_elements: int = 15) -> list[dict]:
     return iframe_elements
 
 
+async def _has_extension(page) -> bool:
+    """Check if the LingQue extension content script is active on this page."""
+    try:
+        return await page.evaluate("typeof window.__lingque !== 'undefined' && window.__lingque.version !== undefined")
+    except Exception:
+        return False
+
+
+async def _snapshot_via_extension(browser: PlaywrightBrowser, max_elements: int = 80) -> tuple[str, dict] | None:
+    """
+    Try using the Chrome extension for a richer snapshot.
+    Returns None if extension is not available.
+    """
+    page = browser._page
+    if not page:
+        return None
+
+    if not await _has_extension(page):
+        return None
+
+    try:
+        raw = await page.evaluate(
+            f"window.__lingque.scanElements({{maxElements: {max_elements}, viewportOnly: true}})"
+        )
+    except Exception as e:
+        logger.debug(f"扩展 scanElements 调用失败: {e}")
+        return None
+
+    if not raw or not isinstance(raw, list) or len(raw) == 0:
+        return None
+
+    try:
+        page_info = await page.evaluate(_JS_PAGE_STRUCTURE)
+    except Exception:
+        page_info = {}
+
+    title = page_info.get("title", "")
+    url = page_info.get("url", page.url)
+    lines = [f"页面: {title}", f"URL: {url}"]
+
+    overview_parts = []
+    if page_info.get("forms"):
+        overview_parts.append(f"{page_info['forms']}个表单")
+    if page_info.get("has_dialog"):
+        dialog_info = page_info.get("dialog_info") or {}
+        dialog_title = dialog_info.get("title", "")
+        overview_parts.append(f"有弹窗{'「'+dialog_title+'」' if dialog_title else ''}")
+    sp = page_info.get("scroll_position", {})
+    if sp:
+        pos_desc = "顶部" if sp.get("at_top") else ("底部" if sp.get("at_bottom") else f"滚动{sp.get('percent', 0)}%")
+        overview_parts.append(f"位置:{pos_desc}")
+    if overview_parts:
+        lines.append(f"概览: {', '.join(overview_parts)}")
+    lines.append("[扩展增强模式] 元素含多选择器，定位更精准")
+    lines.append("")
+
+    ref_map: dict[str, dict] = {}
+    dialog_els = [e for e in raw if e.get("in_dialog")]
+    page_els = [e for e in raw if not e.get("in_dialog")]
+    ordered = dialog_els + page_els
+
+    if dialog_els:
+        lines.append(f"弹窗内元素 ({len(dialog_els)} 个，优先操作这些):")
+    elif ordered:
+        lines.append(f"可交互元素 ({len(ordered)} 个，用 [eN] 编号操作):")
+
+    shown_dialog_header = bool(dialog_els)
+    shown_page_header = False
+    seen: dict[tuple[str, str], int] = {}
+
+    for i, el in enumerate(ordered):
+        if not el.get("in_dialog") and not shown_page_header and shown_dialog_header:
+            shown_page_header = True
+            lines.append(f"\n页面其他元素 ({len(page_els)} 个):")
+
+        ref = f"e{i + 1}"
+        role = el.get("role", "")
+        name = (el.get("name") or "").strip()
+        if not name:
+            continue
+        label = _ROLE_LABELS.get(role, role)
+
+        key = (role, name)
+        nth = None
+        if key in seen:
+            seen[key] += 1
+            nth = seen[key]
+        else:
+            seen[key] = 0
+
+        parts = [f"  [{ref}] {label} \"{name}\""]
+        states = []
+        if el.get("value"):
+            states.append(f"值=\"{str(el['value'])[:20]}\"")
+        if el.get("checked"):
+            states.append("✓已选")
+        if el.get("disabled"):
+            states.append("禁用")
+        if el.get("required"):
+            states.append("必填")
+        if el.get("in_shadow"):
+            states.append("Shadow")
+        if states:
+            parts.append(f"  ({', '.join(states)})")
+        lines.append("".join(parts))
+
+        sels = el.get("selectors") or {}
+        ref_info: dict = {
+            "role": role, "name": name, "nth": nth,
+            "selectors": sels,
+            "css": sels.get("uniquePath") or sels.get("css") or "",
+        }
+        ref_map[ref] = ref_info
+
+    if len(raw) > max_elements:
+        lines.append(f"  ... 还有约 {len(raw) - max_elements} 个元素未显示")
+
+    logger.info(f"扩展快照完成: {len(ordered)} 个元素")
+    return "\n".join(lines), ref_map
+
+
 async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80) -> tuple[str, dict]:
     """
-    增强版页面快照。优先使用 aria_snapshot，不可用时回退 JS 扫描。
+    增强版页面快照。
+    优先级: Chrome扩展 > aria_snapshot > JS 扫描。
 
     返回: (structured_info_text, ref_map)
     """
     if not browser._page:
         return "浏览器未打开", {}
+
+    ext_result = await _snapshot_via_extension(browser, max_elements)
+    if ext_result is not None:
+        return ext_result
 
     # 收集页面结构信息
     try:
@@ -1875,9 +2038,21 @@ def _to_ai_friendly_error(exc: Exception, ref: str = "") -> str:
 
 
 def _resolve_ref(page, ref: str, ref_map: dict):
-    """将元素引用解析为 Playwright locator。支持: eN 编号 / CSS 选择器 / XPath"""
+    """将元素引用解析为 Playwright locator。支持: eN 编号 / CSS 选择器 / XPath。
+    当 ref_map 含扩展多选择器时，按稳定性依次尝试。"""
     if _REF_PATTERN.match(ref) and ref in ref_map:
         info = ref_map[ref]
+
+        sels = info.get("selectors")
+        if sels and isinstance(sels, dict):
+            for key in ("dataAttr", "uniquePath", "css"):
+                sel = sels.get(key, "")
+                if sel and not sel.startswith("role:"):
+                    try:
+                        return page.locator(sel).first
+                    except Exception:
+                        continue
+
         if info.get("css"):
             return page.locator(info["css"])
         role, name = info["role"], info["name"]
@@ -1983,6 +2158,22 @@ async def _smart_locate(page, ref: str, ref_map: dict, action: str = "click"):
                         return css_loc
                 except Exception:
                     pass
+
+            sels = info.get("selectors")
+            if sels and isinstance(sels, dict):
+                for sel_key in ("xpath", "css", "dataAttr", "uniquePath"):
+                    sel_val = sels.get(sel_key, "")
+                    if not sel_val or sel_val.startswith("role:"):
+                        continue
+                    try:
+                        if sel_key == "xpath":
+                            loc = frame.locator(f"xpath={sel_val}")
+                        else:
+                            loc = frame.locator(sel_val)
+                        if await loc.count() > 0:
+                            return loc.first
+                    except Exception:
+                        continue
 
         raise Exception(f"元素 {ref} (\"{name}\") 无法定位，页面可能已变化，请重新 snapshot")
 
@@ -2416,124 +2607,225 @@ async def _dismiss_blocking_overlay(browser) -> bool:
         return False
 
 
+async def _check_dom_changed(page) -> bool:
+    """Check if the extension detected significant DOM changes since last reset."""
+    try:
+        return await page.evaluate(
+            "typeof window.__lingque !== 'undefined' && window.__lingque.resetDomChanged()"
+        )
+    except Exception:
+        return False
+
+
+async def _recover_by_selectors(page, old_selectors: dict, action_fn, action_name: str) -> SkillResult | None:
+    """Layer 1: try old selectors directly on the (possibly changed) page."""
+    if not old_selectors or not isinstance(old_selectors, dict):
+        return None
+    for key in ("dataAttr", "uniquePath", "css", "xpath"):
+        sel = old_selectors.get(key, "")
+        if not sel or sel.startswith("role:"):
+            continue
+        try:
+            if key == "xpath":
+                loc = page.locator(f"xpath={sel}")
+            else:
+                loc = page.locator(sel)
+            if await loc.count() > 0:
+                logger.info(f"第1层恢复: 旧选择器 {key}={sel!r} 仍然有效")
+                temp_map = {"_recovered": {"role": "", "name": "", "css": sel}}
+                return await action_fn("_recovered", temp_map)
+        except Exception:
+            continue
+    return None
+
+
+def _fuzzy_name_score(old_name: str, new_name: str) -> float:
+    """Simple fuzzy text similarity: 0.0 ~ 1.0."""
+    if not old_name or not new_name:
+        return 0.0
+    if old_name == new_name:
+        return 1.0
+    old_lower, new_lower = old_name.lower(), new_name.lower()
+    if old_lower == new_lower:
+        return 0.95
+    if old_lower in new_lower or new_lower in old_lower:
+        return 0.7
+    shorter = min(len(old_lower), len(new_lower))
+    prefix = 0
+    for a, b in zip(old_lower, new_lower):
+        if a == b:
+            prefix += 1
+        else:
+            break
+    if shorter > 0 and prefix / shorter > 0.6:
+        return 0.5
+    return 0.0
+
+
+def _bbox_distance(a: dict, b: dict) -> float:
+    """Euclidean distance between the centers of two bboxes."""
+    if not a or not b:
+        return float("inf")
+    ax = a.get("x", 0) + a.get("w", 0) / 2
+    ay = a.get("y", 0) + a.get("h", 0) / 2
+    bx = b.get("x", 0) + b.get("w", 0) / 2
+    by = b.get("y", 0) + b.get("h", 0) / 2
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
 async def _action_with_stale_recovery(browser, ref: str, action_fn, action_name: str) -> SkillResult:
     """
-    v2.0 增强版：带失效引用自动恢复的操作包装器。
-    
-    恢复策略：
-    0. 操作前主动检测并关闭遮挡弹窗（避免 30s 超时浪费）
-    1. 首先尝试直接执行
-    2. 失败后重新快照，根据 role+name+nth 精确匹配
-    3. 精确匹配失败则尝试模糊匹配（仅 role+name）
-    4. 仍然失败则尝试文本匹配
-    5. 提供智能的错误提示和恢复建议
+    v3.0 三层渐进式恢复。
+
+    操作前: 检查扩展 DOM 变更标志，主动刷新快照（预防性）
+    第 1 层: 用旧元素的多选择器直接在新页面 locate（最快）
+    第 2 层: role+name 精确 → 模糊文本匹配（语义恢复）
+    第 3 层: bbox 位置最近的同 role 元素（位置恢复）
     """
+    page = browser._page
+
+    if page and await _check_dom_changed(page):
+        logger.info("扩展检测到 DOM 变化，主动刷新快照")
+        await _SharedBrowser.do_snapshot(force=True)
+
     try:
         return await action_fn(ref, _SharedBrowser._ref_map)
     except Exception as first_err:
         error_str = str(first_err).lower()
         ref_info = _SharedBrowser._ref_map.get(ref)
-        
+
         if not ref_info or not _REF_PATTERN.match(ref):
             return SkillResult(success=False, error=_to_ai_friendly_error(first_err, ref))
 
-        logger.info(f"操作 {action_name}({ref}) 失败，自动重新快照重试: {first_err}")
+        logger.info(f"操作 {action_name}({ref}) 失败，启动三层恢复: {first_err}")
 
-        # v2.0: 根据错误类型决定恢复策略
         need_wait = "not visible" in error_str or "hidden" in error_str or "detached" in error_str
         is_strict_violation = "strict mode violation" in error_str
         is_intercepted = "intercepts pointer" in error_str
-        
+
         if is_intercepted:
             dismissed = await _dismiss_blocking_overlay(browser)
             if dismissed:
-                logger.info("已自动关闭遮挡弹窗，直接重试原操作")
                 try:
                     return await action_fn(ref, _SharedBrowser._ref_map)
                 except Exception:
-                    logger.info("关闭弹窗后原引用仍失败，继续重新快照")
-            else:
-                logger.info("未能关闭遮挡弹窗，尝试重新快照恢复")
+                    pass
 
         if need_wait:
             await asyncio.sleep(0.5)
             await browser.wait_for_page_ready(timeout=3)
-        
-        try:
-            _, new_ref_map = await _SharedBrowser.do_snapshot()
 
-            old_role = ref_info.get("role", "")
-            old_name = ref_info.get("name", "")
-            old_nth = ref_info.get("nth")
-            
-            # 策略1: 精确匹配 role + name + nth
+        old_role = ref_info.get("role", "")
+        old_name = ref_info.get("name", "")
+        old_nth = ref_info.get("nth")
+        old_selectors = ref_info.get("selectors")
+        old_bbox = ref_info.get("bbox")
+
+        try:
+            # ── Layer 1: selector direct hit ──
+            if old_selectors:
+                result = await _recover_by_selectors(page, old_selectors, action_fn, action_name)
+                if result is not None:
+                    _SharedBrowser._ref_map = {}
+                    return result
+
+            # Re-snapshot for layers 2 & 3
+            _, new_ref_map = await _SharedBrowser.do_snapshot(force=True)
+
+            # ── Layer 2: semantic matching ──
             new_ref = None
-            fallback_ref = None
+            best_fuzzy_ref = None
+            best_fuzzy_score = 0.0
             name_matches = []
-            
+
             for r, info in new_ref_map.items():
-                if info.get("role") == old_role and info.get("name") == old_name:
+                if info.get("role") != old_role:
+                    continue
+                new_name = info.get("name", "")
+                if new_name == old_name:
                     name_matches.append(r)
                     if info.get("nth") == old_nth:
                         new_ref = r
                         break
-                    if fallback_ref is None:
-                        fallback_ref = r
-            
-            if not new_ref:
-                new_ref = fallback_ref
-            
-            # v2.0: 如果是 strict mode violation，明确选择第一个匹配
+                    if not new_ref:
+                        new_ref = r
+                else:
+                    score = _fuzzy_name_score(old_name, new_name)
+                    if score > best_fuzzy_score:
+                        best_fuzzy_score = score
+                        best_fuzzy_ref = r
+
             if is_strict_violation and len(name_matches) > 1:
                 new_ref = name_matches[0]
-                logger.info(f"strict mode violation: 选择第一个匹配 {new_ref}")
+
+            if not new_ref and best_fuzzy_score >= 0.5:
+                new_ref = best_fuzzy_ref
+                matched_name = new_ref_map[new_ref].get("name", "")
+                logger.info(f"第2层模糊匹配: {old_name!r} -> {matched_name!r} (score={best_fuzzy_score:.2f})")
 
             if new_ref:
-                logger.info(f"自动恢复: {ref} -> {new_ref} (role={old_role}, name={old_name})")
+                logger.info(f"第2层恢复: {ref} -> {new_ref}")
                 try:
                     return await action_fn(new_ref, new_ref_map)
                 except Exception as second_err:
-                    # v2.0: 第二次也失败，尝试文本匹配
                     if old_name:
                         try:
                             text_locator = browser._page.get_by_text(old_name, exact=False).first
                             if await text_locator.count() > 0:
                                 logger.info(f"文本匹配恢复: {old_name}")
-                                # 直接操作文本定位器
                                 if action_name == "click":
                                     await text_locator.click(timeout=10000)
                                     await browser.wait_for_page_ready(timeout=5)
                                     info, _ = await _SharedBrowser.do_snapshot()
-                                    return SkillResult(success=True, data=f"✓ 已点击 (文本匹配)\n\n{info}")
+                                    return SkillResult(success=True, data=f"已点击 (文本匹配)\n\n{info}")
                         except Exception:
                             pass
-                    
                     return SkillResult(success=False, error=_to_ai_friendly_error(second_err, new_ref))
-            else:
-                # v2.0: 提供智能恢复建议
-                suggestions = []
-                if "login" in old_name.lower() or "登录" in old_name:
-                    suggestions.append("检查是否已登录成功，页面可能已跳转")
-                if "submit" in old_name.lower() or "提交" in old_name:
-                    suggestions.append("表单可能已提交，检查是否有成功/错误提示")
-                if old_role == "textbox":
-                    suggestions.append("输入框可能在弹窗中，尝试先检测并关闭弹窗")
-                
-                suggestions.append("尝试调用 browser_snapshot 获取最新元素列表")
-                suggestions.append("尝试调用 browser_check_state 检查当前页面状态")
-                
-                error_msg = (
-                    f"元素 {ref} (\"{old_name}\") 在重新扫描后未找到，页面可能已变化。\n\n"
-                    f"💡 建议操作:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(suggestions))
-                )
-                
-                # 返回最新的快照信息帮助 Agent 决策
-                info, _ = await _SharedBrowser.do_snapshot()
-                
-                return SkillResult(
-                    success=False,
-                    error=f"{error_msg}\n\n--- 当前页面 ---\n{info[:2000]}"
-                )
+
+            # ── Layer 3: position matching ──
+            if old_bbox:
+                best_dist = 50.0
+                best_pos_ref = None
+                for r, info in new_ref_map.items():
+                    if info.get("role") != old_role:
+                        continue
+                    new_bbox = info.get("bbox")
+                    if not new_bbox:
+                        sels = info.get("selectors") or {}
+                        if not sels:
+                            continue
+                    dist = _bbox_distance(old_bbox, new_bbox) if new_bbox else float("inf")
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_pos_ref = r
+                if best_pos_ref:
+                    pos_name = new_ref_map[best_pos_ref].get("name", "")
+                    logger.info(f"第3层位置恢复: {ref} -> {best_pos_ref} (dist={best_dist:.0f}px, name={pos_name!r})")
+                    try:
+                        return await action_fn(best_pos_ref, new_ref_map)
+                    except Exception as pos_err:
+                        return SkillResult(success=False, error=_to_ai_friendly_error(pos_err, best_pos_ref))
+
+            # All layers failed
+            suggestions = []
+            if "login" in old_name.lower() or "登录" in old_name:
+                suggestions.append("检查是否已登录成功，页面可能已跳转")
+            if "submit" in old_name.lower() or "提交" in old_name:
+                suggestions.append("表单可能已提交，检查是否有成功/错误提示")
+            if old_role == "textbox":
+                suggestions.append("输入框可能在弹窗中，尝试先检测并关闭弹窗")
+            suggestions.append("尝试调用 browser_snapshot 获取最新元素列表")
+
+            error_msg = (
+                f"元素 {ref} (\"{old_name}\") 三层恢复均失败，页面可能已变化。\n\n"
+                f"建议:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(suggestions))
+            )
+
+            info, _ = await _SharedBrowser.do_snapshot()
+            return SkillResult(
+                success=False,
+                error=f"{error_msg}\n\n--- 当前页面 ---\n{info[:2000]}",
+            )
         except Exception as retry_err:
             return SkillResult(success=False, error=_to_ai_friendly_error(retry_err, ref))
 
@@ -5120,3 +5412,548 @@ async def browser_analyze_page(question: str = "") -> SkillResult:
         )
     except Exception as e:
         return SkillResult(success=False, error=f"视觉分析失败: {e}")
+
+
+# ==================== 扩展增强技能 ====================
+
+
+@register(
+    name="browser_find_similar",
+    description=(
+        "查找页面上结构相似的元素列表（类似 RPA 获取相似元素功能）。"
+        "给定一个元素的 CSS 选择器，自动找到同一列表容器中所有结构相同的兄弟元素并提取数据。"
+        "适用于商品卡片、搜索结果、评论列表、表格行等重复结构。"
+        "需要安装 LingQue 浏览器扩展（Chrome 启动时自动加载）。"
+    ),
+    category="browser",
+    parameters={
+        "type": "object",
+        "properties": {
+            "selector": {
+                "type": "string",
+                "description": "目标元素的 CSS 选择器（列表中任意一个条目），如 '.product-card:first-child', '#item-1'",
+            },
+            "fields": {
+                "type": "object",
+                "description": "字段映射（可选）。键=字段名, 值=子元素CSS选择器。留空则自动提取 text/image/link/price",
+            },
+            "max_items": {
+                "type": "integer",
+                "description": "最多返回多少条（默认 100）",
+            },
+        },
+        "required": ["selector"],
+    },
+    risk_level="low",
+)
+async def browser_find_similar(
+    selector: str,
+    fields: dict = None,
+    max_items: int = 100,
+) -> SkillResult:
+    if not _SharedBrowser.is_active():
+        return _not_active_error()
+    try:
+        browser = await _SharedBrowser.get()
+        page = browser._page
+
+        has_ext = await _has_extension(page)
+        if not has_ext:
+            return SkillResult(
+                success=False,
+                error="此功能需要 LingQue 浏览器扩展。请确认 Chrome 启动时已加载扩展（extension/ 目录存在即可自动加载）。"
+                      "\n回退方案：使用 browser_scroll_collect 配合 CSS 选择器采集数据。",
+            )
+
+        js_call = """
+        (args) => {
+            return window.__lingque.findSimilar(args.selector, {
+                fields: args.fields || {},
+                maxItems: args.maxItems || 100,
+            });
+        }
+        """
+        result = await page.evaluate(js_call, {
+            "selector": selector,
+            "fields": fields or {},
+            "maxItems": max_items,
+        })
+
+        if not result or result.get("error"):
+            err = result.get("error", "未知错误") if result else "扩展调用失败"
+            suggestion = result.get("suggestion", "") if result else ""
+            return SkillResult(
+                success=False,
+                error=f"findSimilar 失败: {err}" + (f"\n建议: {suggestion}" if suggestion else ""),
+            )
+
+        items = result.get("items", [])
+        if not items:
+            return SkillResult(
+                success=True,
+                data=f"未找到与 `{selector}` 结构相似的元素。容器: {result.get('container', '未知')}",
+            )
+
+        lines = [
+            f"找到 {result.get('itemCount', len(items))} 个相似元素",
+            f"容器: {result.get('container', '?')}",
+            f"结构签名: {result.get('signature', '?')}",
+            "",
+        ]
+        for item in items:
+            idx = item.get("index", 0) + 1
+            data = item.get("data", {})
+            sel = item.get("selector", "")
+            fields_str = " | ".join(
+                f"{k}={v}" if not isinstance(v, dict) else f"{k}={v.get('text', '')}"
+                for k, v in data.items() if v
+            )
+            lines.append(f"  {idx}. {fields_str}")
+            if sel:
+                lines.append(f"     选择器: {sel}")
+
+        return SkillResult(success=True, data="\n".join(lines))
+    except Exception as e:
+        return SkillResult(success=False, error=f"相似元素查找失败: {e}")
+
+
+@register(
+    name="browser_extract_list",
+    description=(
+        "从页面指定容器中提取结构化列表数据。"
+        "需要指定容器选择器和条目选择器，可选字段映射。"
+        "比 browser_scroll_collect 更精准，支持嵌套字段提取。"
+        "需要安装 LingQue 浏览器扩展。"
+    ),
+    category="browser",
+    parameters={
+        "type": "object",
+        "properties": {
+            "container": {
+                "type": "string",
+                "description": "列表容器的 CSS 选择器，如 '#product-list', '.search-results'",
+            },
+            "item_selector": {
+                "type": "string",
+                "description": "容器内每个条目的 CSS 选择器（可选，默认直接子元素），如 '.item', 'li'",
+            },
+            "fields": {
+                "type": "object",
+                "description": "字段映射。键=字段名, 值=条目内子元素CSS选择器。如 {\"title\": \".name\", \"price\": \".price\", \"img\": \"img\"}",
+            },
+        },
+        "required": ["container"],
+    },
+    risk_level="low",
+)
+async def browser_extract_list(
+    container: str,
+    item_selector: str = "",
+    fields: dict = None,
+) -> SkillResult:
+    if not _SharedBrowser.is_active():
+        return _not_active_error()
+    try:
+        browser = await _SharedBrowser.get()
+        page = browser._page
+
+        has_ext = await _has_extension(page)
+        if not has_ext:
+            return SkillResult(
+                success=False,
+                error="此功能需要 LingQue 浏览器扩展。"
+                      "\n回退方案：使用 browser_scroll_collect 或 browser_extract 采集。",
+            )
+
+        js_call = """
+        (args) => {
+            return window.__lingque.extractList(
+                args.container,
+                args.itemSelector || ':scope > *',
+                args.fields || {}
+            );
+        }
+        """
+        result = await page.evaluate(js_call, {
+            "container": container,
+            "itemSelector": item_selector,
+            "fields": fields or {},
+        })
+
+        if not result or result.get("error"):
+            err = result.get("error", "未知错误") if result else "扩展调用失败"
+            return SkillResult(success=False, error=f"extractList 失败: {err}")
+
+        rows = result.get("rows", [])
+        if not rows:
+            return SkillResult(
+                success=True,
+                data=f"容器 `{container}` 内未找到可见的列表条目。",
+            )
+
+        lines = [f"提取到 {result.get('itemCount', len(rows))} 条数据:\n"]
+        for row in rows:
+            idx = row.get("index", 0) + 1
+            data = row.get("data", {})
+            fields_str = " | ".join(
+                f"{k}={v}" if not isinstance(v, dict) else f"{k}={v.get('text', '')}"
+                for k, v in data.items() if v
+            )
+            lines.append(f"  {idx}. {fields_str}")
+
+        return SkillResult(success=True, data="\n".join(lines))
+    except Exception as e:
+        return SkillResult(success=False, error=f"列表数据提取失败: {e}")
+
+
+@register(
+    name="browser_analyze_structure",
+    description=(
+        "分析当前页面的结构，识别列表、表单、表格、导航等区域。"
+        "在不确定页面结构时先调用此技能，再决定用什么选择器采集数据。"
+        "需要安装 LingQue 浏览器扩展。"
+    ),
+    category="browser",
+    parameters={
+        "type": "object",
+        "properties": {},
+    },
+    risk_level="low",
+)
+async def browser_analyze_structure() -> SkillResult:
+    if not _SharedBrowser.is_active():
+        return _not_active_error()
+    try:
+        browser = await _SharedBrowser.get()
+        page = browser._page
+
+        has_ext = await _has_extension(page)
+        if not has_ext:
+            return SkillResult(
+                success=False,
+                error="此功能需要 LingQue 浏览器扩展。",
+            )
+
+        result = await page.evaluate("window.__lingque.analyzePage()")
+        if not result:
+            return SkillResult(success=False, error="页面分析返回为空")
+
+        lines = ["页面结构分析:\n"]
+
+        lists = result.get("lists", [])
+        if lists:
+            lines.append(f"列表区域 ({len(lists)} 个):")
+            for i, lst in enumerate(lists, 1):
+                samples = ", ".join(lst.get("sampleTexts", [])[:2])
+                lines.append(
+                    f"  {i}. 选择器: {lst.get('selector', '?')} | "
+                    f"{lst.get('itemCount', '?')} 条 | 示例: {samples}"
+                )
+            lines.append("")
+
+        forms = result.get("forms", [])
+        if forms:
+            lines.append(f"表单 ({len(forms)} 个):")
+            for i, form in enumerate(forms, 1):
+                fields_str = ", ".join(form.get("fieldNames", [])[:5])
+                lines.append(
+                    f"  {i}. 选择器: {form.get('selector', '?')} | "
+                    f"{form.get('inputCount', 0)} 个输入 | 字段: {fields_str}"
+                )
+            lines.append("")
+
+        tables = result.get("tables", [])
+        if tables:
+            lines.append(f"表格 ({len(tables)} 个):")
+            for i, tbl in enumerate(tables, 1):
+                headers = ", ".join(tbl.get("headers", [])[:5])
+                lines.append(
+                    f"  {i}. 选择器: {tbl.get('selector', '?')} | "
+                    f"{tbl.get('rowCount', 0)} 行 | 表头: {headers}"
+                )
+            lines.append("")
+
+        nav = result.get("nav", [])
+        if nav:
+            lines.append(f"导航 ({len(nav)} 个):")
+            for i, n in enumerate(nav, 1):
+                lines.append(
+                    f"  {i}. 选择器: {n.get('selector', '?')} | "
+                    f"{n.get('linkCount', 0)} 个链接"
+                )
+
+        if not lists and not forms and not tables and not nav:
+            lines.append("未识别到明显的列表/表单/表格/导航结构。")
+            lines.append("可尝试 browser_find_similar 配合具体元素选择器查找重复结构。")
+
+        return SkillResult(success=True, data="\n".join(lines))
+    except Exception as e:
+        return SkillResult(success=False, error=f"页面结构分析失败: {e}")
+
+
+# ==================== 自动翻页采集 ====================
+
+
+_JS_SIMPLE_EXTRACT = """
+({selector, fields, seenFps, maxItems}) => {
+    const items = document.querySelectorAll(selector);
+    const results = [];
+    for (const el of items) {
+        if (results.length >= maxItems) break;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        const fp = (el.innerText || '').trim().slice(0, 100);
+        if (!fp || seenFps.includes(fp)) continue;
+        if (fields && Object.keys(fields).length > 0) {
+            const row = {};
+            for (const [key, subSel] of Object.entries(fields)) {
+                let attrName = null;
+                let actualSel = subSel;
+                if (subSel.includes('@')) {
+                    const parts = subSel.split('@');
+                    actualSel = parts[0];
+                    attrName = parts[1];
+                }
+                const sub = actualSel ? el.querySelector(actualSel) : el;
+                if (sub) {
+                    if (sub.tagName === 'IMG') {
+                        row[key] = sub.src || sub.getAttribute('data-src') || '';
+                    } else if (attrName) {
+                        row[key] = sub.getAttribute(attrName) || '';
+                    } else {
+                        row[key] = (sub.innerText || sub.textContent || '').trim().slice(0, 200);
+                    }
+                } else {
+                    row[key] = '';
+                }
+            }
+            row['_fp'] = fp;
+            results.push(row);
+        } else {
+            results.push({text: fp, _fp: fp});
+        }
+    }
+    return results;
+}
+"""
+
+_JS_FIND_NEXT_BUTTON = """
+() => {
+    if (typeof window.__lingque !== 'undefined' && window.__lingque.findPagination) {
+        return window.__lingque.findPagination();
+    }
+    const textPatterns = ['下一页', '下页', 'Next', 'next', '»', '›'];
+    const allClickable = document.querySelectorAll('a, button, [role="button"], li');
+    for (const el of allClickable) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        const st = window.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden') continue;
+        const text = (el.innerText || el.textContent || '').trim().slice(0, 20);
+        const ariaLabel = el.getAttribute('aria-label') || '';
+        const combined = text + ' ' + ariaLabel;
+        for (const pat of textPatterns) {
+            if (combined.includes(pat)) {
+                const disabled = el.classList.contains('disabled') ||
+                                 el.hasAttribute('disabled') ||
+                                 el.getAttribute('aria-disabled') === 'true';
+                if (!disabled) {
+                    let sel = '';
+                    if (el.id) sel = '#' + CSS.escape(el.id);
+                    else if (el.className && typeof el.className === 'string') {
+                        const cls = el.className.trim().split(/\\s+/);
+                        const nextCls = cls.find(c => /next/i.test(c));
+                        if (nextCls) sel = '.' + CSS.escape(nextCls);
+                    }
+                    return {found: true, bestMatch: {selector: sel, text: text}, isLastPage: false};
+                } else {
+                    return {found: false, bestMatch: null, isLastPage: true};
+                }
+            }
+        }
+    }
+    return {found: false, bestMatch: null, isLastPage: true};
+}
+"""
+
+
+@register(
+    name="browser_collect_pages",
+    description=(
+        "自动翻页采集数据：提取当前页列表数据 → 自动点击'下一页' → 重复采集，直到采完或达到上限。"
+        "一句话完成多页数据采集，无需手动循环。支持自动检测翻页按钮，也可手动指定。"
+    ),
+    category="browser",
+    parameters={
+        "type": "object",
+        "properties": {
+            "item_selector": {
+                "type": "string",
+                "description": "列表条目的 CSS 选择器，如 'li[data-sku]', '.product-card', '.search-item'",
+            },
+            "fields": {
+                "type": "object",
+                "description": "字段映射（可选）。键=字段名, 值=条目内子元素CSS选择器。如 {\"title\":\".name\",\"price\":\".price\"}。留空则提取纯文本",
+            },
+            "next_button": {
+                "type": "string",
+                "description": "下一页按钮的 CSS 选择器（留空则自动检测'下一页/Next/»'按钮）",
+            },
+            "max_pages": {
+                "type": "integer",
+                "description": "最多翻几页（默认 10）",
+            },
+            "max_items": {
+                "type": "integer",
+                "description": "最多采集多少条（默认 500）",
+            },
+        },
+        "required": ["item_selector"],
+    },
+    risk_level="low",
+)
+async def browser_collect_pages(
+    item_selector: str,
+    fields: dict = None,
+    next_button: str = "",
+    max_pages: int = 10,
+    max_items: int = 500,
+) -> SkillResult:
+    if not _SharedBrowser.is_active():
+        return _not_active_error()
+    try:
+        browser = await _SharedBrowser.get()
+        page = browser._page
+
+        all_items = []
+        seen_fps: list[str] = []
+        pages_collected = 0
+        consecutive_empty = 0
+
+        for page_num in range(1, max_pages + 1):
+            remaining = max_items - len(all_items)
+            if remaining <= 0:
+                break
+
+            has_ext = await _has_extension(page)
+            if has_ext and fields:
+                try:
+                    ext_result = await page.evaluate(
+                        "(args) => window.__lingque.extractList(args.container, args.itemSel, args.fields)",
+                        {"container": "body", "itemSel": item_selector, "fields": fields or {}},
+                    )
+                    if ext_result and not ext_result.get("error"):
+                        rows = ext_result.get("rows", [])
+                        batch = []
+                        for row in rows:
+                            data = row.get("data", {})
+                            fp = " ".join(str(v)[:50] for v in data.values() if v).strip()[:100]
+                            if fp and fp not in seen_fps:
+                                seen_fps.append(fp)
+                                data["_fp"] = fp
+                                batch.append(data)
+                                if len(all_items) + len(batch) >= max_items:
+                                    break
+                        if batch:
+                            all_items.extend(batch)
+                            pages_collected += 1
+                            consecutive_empty = 0
+                        else:
+                            consecutive_empty += 1
+                    else:
+                        raise ValueError("extension extractList failed, fallback to JS")
+                except Exception:
+                    pass
+
+            if pages_collected < page_num:
+                batch = await page.evaluate(
+                    _JS_SIMPLE_EXTRACT,
+                    {
+                        "selector": item_selector,
+                        "fields": fields or {},
+                        "seenFps": seen_fps[-500:],
+                        "maxItems": remaining,
+                    },
+                )
+                new_items = []
+                for item in (batch or []):
+                    fp = item.pop("_fp", "")
+                    if fp:
+                        seen_fps.append(fp)
+                    new_items.append(item)
+                if new_items:
+                    all_items.extend(new_items)
+                    pages_collected += 1
+                    consecutive_empty = 0
+                else:
+                    consecutive_empty += 1
+
+            if len(all_items) >= max_items:
+                break
+            if consecutive_empty >= 2:
+                break
+            if page_num >= max_pages:
+                break
+
+            # Find and click "next page"
+            if next_button:
+                next_sel = next_button
+                is_last = False
+            else:
+                try:
+                    pag_info = await page.evaluate(_JS_FIND_NEXT_BUTTON)
+                except Exception:
+                    pag_info = {"found": False, "isLastPage": True}
+
+                if not pag_info or not pag_info.get("found"):
+                    if pag_info and pag_info.get("isLastPage"):
+                        break
+                    break
+                best = pag_info.get("bestMatch") or {}
+                next_sel = best.get("selector", "")
+                is_last = pag_info.get("isLastPage", False)
+                if is_last:
+                    break
+
+            if not next_sel:
+                next_text = (best.get("text", "") if not next_button else "").strip()
+                if next_text:
+                    try:
+                        loc = page.get_by_text(next_text, exact=False).first
+                        if await loc.count() > 0:
+                            await loc.click(timeout=8000)
+                        else:
+                            break
+                    except Exception:
+                        break
+                else:
+                    break
+            else:
+                try:
+                    loc = page.locator(next_sel).first
+                    await loc.click(timeout=8000)
+                except Exception as click_err:
+                    logger.warning(f"翻页按钮点击失败: {click_err}")
+                    break
+
+            await browser.wait_for_page_ready(timeout=8)
+            await asyncio.sleep(1.0)
+
+        if not all_items:
+            return SkillResult(
+                success=True,
+                data=f"未采集到数据。请确认选择器 `{item_selector}` 是否正确。"
+                     f"\n建议先用 browser_analyze_structure 或 browser_execute_js 确认页面结构。",
+            )
+
+        lines = [f"共采集 {len(all_items)} 条数据（翻了 {pages_collected} 页）:\n"]
+        for idx, item in enumerate(all_items, 1):
+            if fields:
+                fields_str = " | ".join(f"{k}={v}" for k, v in item.items() if v and k != "_fp")
+                lines.append(f"  {idx}. {fields_str}")
+            else:
+                lines.append(f"  {idx}. {item.get('text', '')}")
+
+        return SkillResult(success=True, data="\n".join(lines))
+    except Exception as e:
+        return SkillResult(success=False, error=f"自动翻页采集失败: {e}")
