@@ -24,6 +24,11 @@ env/
 /memory/
 workspaces/cookies/
 workspaces/screenshots/
+workspaces/credentials.json
+workspaces/scheduler_tasks.json
+workspaces/.chrome_profile/
+workspaces/.workflow_runs/
+workspaces/uploads/
 downloads/
 logs/
 *.log

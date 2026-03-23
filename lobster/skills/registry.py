@@ -114,7 +114,7 @@ class SkillRegistry:
 
     # ---- 动态工具过滤 ----
 
-    _ALWAYS_CATEGORIES = {"general", "file", "code", "memory", "system", "self_improvement"}
+    _ALWAYS_CATEGORIES = {"general", "file", "code", "memory", "system", "self_improvement", "credential"}
 
     _KEYWORD_TO_CATEGORY: dict[str, set[str]] = {
         "browser": {"browser", "web", "search"},
@@ -129,7 +129,8 @@ class SkillRegistry:
         "email":   {"email", "calendar"},
         "日程":    {"email", "calendar"},
         "日历":    {"email", "calendar"},
-        "提醒":    {"email", "calendar", "scheduler"},
+        "提醒":    {"email", "calendar", "scheduler", "reminder"},
+        "闹钟":    {"reminder", "scheduler"},
         "定时":    {"scheduler"},
         "cron":    {"scheduler"},
         "调度":    {"scheduler"},
@@ -146,13 +147,19 @@ class SkillRegistry:
         "飞书":    {"feishu", "feishu_group", "feishu_docs"},
         "群":      {"feishu_group"},
         "文档":    {"feishu_docs", "file"},
-        "技能市场": {"skill_market"},
-        "安装技能": {"skill_market"},
+        "技能市场": {"skill_market", "transplanted"},
+        "安装技能": {"skill_market", "transplanted"},
+        "已安装":  {"transplanted", "plugin"},
         "生成技能": {"skill_generator"},
-        "插件":    {"plugin"},
+        "插件":    {"plugin", "transplanted"},
+        "密钥":    {"credential"},
+        "凭证":    {"credential"},
+        "api_key": {"credential"},
+        "token":   {"credential"},
+        "secret":  {"credential"},
     }
 
-    _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow"}
+    _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow", "transplanted", "plugin"}
 
     def select_tools_for_task(self, user_message: str,
                               recent_tool_names: list[str] | None = None) -> list[dict]:

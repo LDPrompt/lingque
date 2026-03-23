@@ -202,3 +202,89 @@ async def review_learnings(limit: int = 5, category: str = "") -> SkillResult:
         return SkillResult(success=True, data="\n".join(output_lines))
     except Exception as e:
         return SkillResult(success=False, error=str(e))
+
+
+# =====================================================================
+# 版本升级技能
+# =====================================================================
+
+@register(
+    name="check_update",
+    description="检查灵雀是否有新版本可用，显示更新日志",
+    parameters={"type": "object", "properties": {}},
+    risk_level="low",
+    category="system",
+)
+async def check_update() -> SkillResult:
+    try:
+        from ..updater import check_for_updates, get_current_version
+        result = await check_for_updates()
+        if result["has_update"]:
+            notes = result["release_notes"]
+            if len(notes) > 500:
+                notes = notes[:500] + "..."
+            msg = (
+                f"🆕 **发现新版本 v{result['latest']}**\n"
+                f"当前版本: v{result['current']}\n"
+            )
+            if result["published_at"]:
+                msg += f"发布时间: {result['published_at'][:10]}\n"
+            if notes:
+                msg += f"\n📋 更新内容:\n{notes}\n"
+            if result["release_url"]:
+                msg += f"\n🔗 {result['release_url']}\n"
+            msg += "\n💡 说「升级」即可一键更新"
+            return SkillResult(success=True, data=msg)
+        else:
+            return SkillResult(
+                success=True,
+                data=f"✅ 当前已是最新版本 v{result['current']}，无需升级",
+            )
+    except Exception as e:
+        return SkillResult(success=False, error=f"版本检查失败: {e}")
+
+
+@register(
+    name="perform_upgrade",
+    description="执行灵雀系统升级。会自动拉取最新代码、安装依赖、迁移数据并重启服务。升级不会影响记忆和用户数据。",
+    parameters={"type": "object", "properties": {}},
+    risk_level="high",
+    category="system",
+)
+async def perform_upgrade() -> SkillResult:
+    try:
+        from ..updater import check_for_updates, perform_upgrade as do_upgrade
+
+        check = await check_for_updates()
+        if not check["has_update"]:
+            return SkillResult(
+                success=True,
+                data=f"当前已是最新版本 v{check['current']}，无需升级",
+            )
+
+        progress_msgs = []
+
+        async def _on_progress(msg: str):
+            progress_msgs.append(msg)
+
+        result = await do_upgrade(notify_callback=_on_progress)
+
+        if result["success"]:
+            return SkillResult(
+                success=True,
+                data=(
+                    f"🎉 升级成功! v{result['from_version']} → v{result['to_version']}\n\n"
+                    f"升级日志:\n" + "\n".join(result["steps"]) +
+                    "\n\n⚠️ 服务即将重启，请稍候..."
+                ),
+            )
+        else:
+            return SkillResult(
+                success=False,
+                error=(
+                    f"升级失败: {result['error']}\n\n"
+                    f"已执行步骤:\n" + "\n".join(result["steps"])
+                ),
+            )
+    except Exception as e:
+        return SkillResult(success=False, error=f"升级执行异常: {e}")

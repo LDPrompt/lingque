@@ -18,8 +18,9 @@ _SENSITIVE_PATH_KEYWORDS = (
     "credentials.json",
     "cookies" + os.sep,
     ".chrome_profile" + os.sep,
-    ".env",
 )
+
+_SENSITIVE_BASENAME_PREFIXES = (".env",)
 
 
 def set_allowed_paths(paths: list[str]):
@@ -42,6 +43,12 @@ def _check_path(path: str) -> str:
     lower = abs_path.lower()
     for kw in _SENSITIVE_PATH_KEYWORDS:
         if kw in lower:
+            raise PermissionError(
+                f"安全限制: 该文件受保护，禁止直接读写 ({os.path.basename(abs_path)})"
+            )
+    basename = os.path.basename(abs_path).lower()
+    for prefix in _SENSITIVE_BASENAME_PREFIXES:
+        if basename == prefix or (basename.startswith(prefix) and not basename.endswith(".example")):
             raise PermissionError(
                 f"安全限制: 该文件受保护，禁止直接读写 ({os.path.basename(abs_path)})"
             )

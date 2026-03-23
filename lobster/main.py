@@ -54,15 +54,19 @@ from .scheduler import CronScheduler, DailySummary, TaskQueue, EmailMonitor, Hea
 from .transplanter import SkillTransplanter
 
 
-BANNER = r"""
+def _make_banner() -> str:
+    from . import __version__
+    return f"""\
    __    _             ____
-  / /   (_)___  ____ _/ __ \__  _____
- / /   / / __ \/ __ `/ / / / / / / _ \
+  / /   (_)___  ____ _/ __ \\__  _____
+ / /   / / __ \\/ __ `/ / / / / / / _ \\
 / /___/ / / / / /_/ / /_/ / /_/ /  __/
-\____/_/_/ /_/\__, /\___\_\__,_/\___/
+\\____/_/_/ /_/\\__, /\\___\\_\\__,_/\\___/
              /____/
-🐦 灵雀 LingQue v0.4.0 - 灵动 Prompt 出品
+🐦 灵雀 LingQue v{__version__} - 灵动 Prompt 出品
 """
+
+BANNER = _make_banner()
 
 
 def _security_preflight(config, channel_list: list[str]):
@@ -336,6 +340,15 @@ async def main():
 
     print(BANNER)
 
+    # 数据迁移 (版本升级时自动适配旧数据)
+    try:
+        from .migrations import run_pending
+        migrated = run_pending(config.memory_dir)
+        if migrated:
+            logger.info(f"📦 数据迁移完成: {migrated}")
+    except Exception as e:
+        logger.warning(f"数据迁移检查失败 (不影响启动): {e}")
+
     # 安全路径
     allowed = config.security.get_allowed_paths()
     if allowed:
@@ -603,6 +616,15 @@ async def main():
             logger.info("💓 心跳引擎已启动")
         except Exception as e:
             logger.warning(f"心跳引擎启动失败: {e}")
+
+    # 后台检查版本更新 (不阻塞主流程)
+    _update_check_task = None
+    if os.environ.get("AUTO_UPDATE_CHECK", "true").lower() not in ("false", "0", "no", "off"):
+        try:
+            from .updater import startup_check
+            _update_check_task = asyncio.create_task(startup_check())
+        except Exception:
+            pass
 
     # 等待所有通道 (任一退出则全部退出)
     try:
