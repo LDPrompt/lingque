@@ -78,12 +78,11 @@ fi
 
 # ── 拉取代码 ──
 log "正在拉取最新代码..."
-git stash --include-untracked -m "upgrade-$(date +%s)" 2>/dev/null || true
-STASHED=$?
+git stash --include-untracked -m "upgrade-$(date +%s)" 2>/dev/null && STASHED=true || STASHED=false
 
 if ! git pull --rebase origin main; then
     err "git pull 失败"
-    if [[ $STASHED -eq 0 ]]; then
+    if [[ "$STASHED" == "true" ]]; then
         git stash pop 2>/dev/null || true
     fi
     exit 1
@@ -103,7 +102,7 @@ python -m lobster.migrations 2>/dev/null || python3 -m lobster.migrations 2>/dev
 ok "数据迁移检查完成"
 
 # ── 恢复本地修改 ──
-if [[ $STASHED -eq 0 ]]; then
+if [[ "$STASHED" == "true" ]]; then
     git stash pop 2>/dev/null || warn "恢复本地修改失败，可用 git stash list 查看"
 fi
 

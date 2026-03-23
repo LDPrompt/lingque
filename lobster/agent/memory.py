@@ -510,7 +510,7 @@ class Memory:
             logger.warning(f"配对验证: {len(self.messages)} -> {len(validated)} 条消息")
             self.messages = list(validated)
 
-        # 单条消息截断保护（浅拷贝避免破坏原始数据）
+        # 单条消息截断保护（深拷贝 tool_calls 避免破坏原始数据）
         import copy
         validated = [copy.copy(m) for m in validated]
         for msg in validated:
@@ -518,13 +518,16 @@ class Memory:
                 original_len = len(msg.content)
                 msg.content = msg.content[:self.MAX_SINGLE_MSG_CHARS] + \
                     f"\n... [内容已截断，原始 {original_len} 字符]"
-            # 截断过长的 tool_calls 参数
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if msg.tool_calls:
+                new_tcs = []
                 for tc in msg.tool_calls:
-                    if hasattr(tc, 'arguments') and isinstance(tc.arguments, dict):
+                    if isinstance(getattr(tc, 'arguments', None), dict):
                         args_str = str(tc.arguments)
                         if len(args_str) > self.MAX_SINGLE_MSG_CHARS:
+                            tc = copy.copy(tc)
                             tc.arguments = {"_truncated": args_str[:self.MAX_SINGLE_MSG_CHARS // 2]}
+                    new_tcs.append(tc)
+                msg.tool_calls = new_tcs
 
         # 安全截断兜底（配对感知：使用 _find_safe_split 寻找安全分割点）
         if len(validated) <= self.max_context_messages:

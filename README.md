@@ -276,7 +276,27 @@ steps:
 
 ## 快速开始
 
-### 环境要求
+### 🪟 Windows 用户一键安装
+
+> **零基础？** 看这里就够了 → [**Windows 安装教程（图文）**](docs/Windows安装教程.md)
+
+打开 **管理员 PowerShell**，粘贴一行命令即可完成安装（自动安装 Python/Git/Docker，无需手动下载）：
+
+**源码版**（推荐新手）：
+```powershell
+irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-source.ps1 | iex
+```
+
+**Docker 版**（推荐有基础的用户）：
+```powershell
+irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-docker.ps1 | iex
+```
+
+---
+
+### 手动安装
+
+#### 环境要求
 
 | 项目 | 最低要求 | 推荐配置 |
 |------|---------|---------|
@@ -284,14 +304,14 @@ steps:
 | 内存 | 2GB | 4GB+ |
 | 系统 | Linux / macOS / Windows | Ubuntu 20.04+ / CentOS 7+ |
 
-### 1. 克隆项目
+#### 1. 克隆项目
 
 ```bash
 git clone https://github.com/LDPrompt/lingque.git
 cd lingque
 ```
 
-### 2. 安装依赖
+#### 2. 安装依赖
 
 ```bash
 # 创建虚拟环境
@@ -305,7 +325,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 3. 配置
+#### 3. 配置
 
 ```bash
 cp .env.example .env
@@ -325,7 +345,7 @@ MEMORY_DIR=./memory
 WORKSPACE_DIR=./workspaces
 ```
 
-### 4. 启动
+#### 4. 启动
 
 ```bash
 python -m lobster.main
@@ -340,12 +360,12 @@ python -m lobster.main
 / /___/ / / / / /_/ / /_/ / /_/ /  __/
 \____/_/_/ /_/\__, /\___\_\__,_/\___/
              /____/
-🐦 灵雀 LingQue v0.4.0 - 灵动 Prompt 出品
+🐦 灵雀 LingQue v1.1.0 - 灵动 Prompt 出品
 
 你>
 ```
 
-### Docker 部署
+#### Docker 部署
 
 ```bash
 # 使用 docker-compose 一键启动

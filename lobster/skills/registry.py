@@ -144,9 +144,10 @@ class SkillRegistry:
         "后台":    {"ralph", "scheduler"},
         "mcp":     {"mcp"},
         "服务":    {"mcp"},
-        "飞书":    {"feishu", "feishu_group", "feishu_docs"},
+        "飞书":    {"feishu", "feishu_group"},
         "群":      {"feishu_group"},
-        "文档":    {"feishu_docs", "file"},
+        "文档":    {"feishu", "file"},
+        "云文档":  {"feishu"},
         "技能市场": {"skill_market", "transplanted"},
         "安装技能": {"skill_market", "transplanted"},
         "已安装":  {"transplanted", "plugin"},
@@ -159,7 +160,7 @@ class SkillRegistry:
         "secret":  {"credential"},
     }
 
-    _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow", "transplanted", "plugin"}
+    _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow", "transplanted", "plugin", "mcp", "feishu"}
 
     def select_tools_for_task(self, user_message: str,
                               recent_tool_names: list[str] | None = None) -> list[dict]:

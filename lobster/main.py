@@ -93,7 +93,12 @@ def _security_preflight(config, channel_list: list[str]):
             "建议限制为具体的工作目录"
         )
 
-    if not os.environ.get("DEEPSEEK_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+    _known_key_vars = (
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY", "DOUBAO_API_KEY",
+    )
+    has_any_key = any(os.environ.get(k) for k in _known_key_vars)
+    if not has_any_key:
         has_provider = any(
             k.startswith("LLM_PROVIDER_") for k in os.environ
         )

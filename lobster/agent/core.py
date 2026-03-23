@@ -211,11 +211,11 @@ class Agent:
             rs.same_category_streak = 1
             rs.last_tool_category = category
         
-        # 易循环工具：只按名称计数，忽略参数差异
+        args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
         if tool_call.name in LOOP_PRONE_TOOLS:
             args_str = f"__loop_prone__{tool_call.name}"
         else:
-            args_str = str(sorted(tool_call.arguments.items()))[:200]
+            args_str = str(sorted(args.items()))[:200]
         
         rs.recent_tool_calls.append((tool_call.name, args_str))
         if len(rs.recent_tool_calls) > STUCK_LOOP_WINDOW:
@@ -675,6 +675,10 @@ class Agent:
                     rs.recent_tool_calls.clear()
                     rs.recent_tool_results.clear()
                     rs.recent_tool_args.clear()
+                    rs.same_tool_streak = 0
+                    rs.same_category_streak = 0
+                    rs.last_tool_name = ""
+                    rs.last_tool_category = ""
 
             context = self.memory.get_context_messages()
             try:
@@ -690,7 +694,11 @@ class Agent:
                     is_first_llm_call = False
                     for msg in self.memory.messages:
                         if msg.images:
+                            n = len(msg.images)
                             msg.images = []
+                            tag = f"[用户发送了{n}张图片]"
+                            if msg.role == "user" and tag not in (msg.content or ""):
+                                msg.content = f"{tag} {msg.content}" if msg.content else tag
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"LLM 调用失败: {error_msg}", exc_info=True)
@@ -897,17 +905,25 @@ class Agent:
             elapsed = time.monotonic() - start_time
             final_response = await self._generate_summary(system_prompt, elapsed, step)
 
-        # === 自我进化: 任务后反思 ===
-        await self._post_task_reflect(user_input, system_prompt)
-
-        # === 用户画像: 任务统计 + 里程碑 + 知识图谱抽取 ===
-        await self._post_task_profile_update(user_input, final_response)
-
         # === 最终输出脱敏: 防止 LLM 回复中泄露密钥 ===
         from .memory import redact_secrets
         final_response = redact_secrets(final_response)
 
         logger.info(f"Agent 回复完成 | {self.llm.get_usage_summary()}")
+
+        # === 后台异步执行反思和画像更新（不阻塞用户回复） ===
+        async def _background_post_tasks():
+            try:
+                await self._post_task_reflect(user_input, system_prompt)
+            except Exception as e:
+                logger.warning(f"后台反思失败: {e}")
+            try:
+                await self._post_task_profile_update(user_input, final_response)
+            except Exception as e:
+                logger.warning(f"后台画像更新失败: {e}")
+
+        asyncio.create_task(_background_post_tasks())
+
         return final_response
 
     async def _generate_summary(self, system_prompt: str, elapsed: float, steps: int) -> str:

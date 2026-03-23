@@ -1441,15 +1441,20 @@ class FeishuChannel(BaseChannel):
         Returns:
             是否发送成功
         """
+        import os
         file_key = await self.upload_file(file_path)
         if not file_key:
             return False
 
         await self._ensure_token()
 
+        ext = os.path.splitext(file_path)[1].lower()
+        is_media = ext in (".mp4", ".opus")
+        msg_type = "media" if is_media else "file"
+
         payload = {
             "receive_id": chat_id,
-            "msg_type": "file",
+            "msg_type": msg_type,
             "content": json.dumps({"file_key": file_key}),
         }
 
@@ -1525,6 +1530,27 @@ class FeishuChannel(BaseChannel):
             logger.error(f"添加表情回复异常: {e}")
 
         return None
+
+    async def delete_message(self, message_id: str) -> bool:
+        """撤回/删除机器人自己发送的消息"""
+        await self._ensure_token()
+        headers = {"Authorization": f"Bearer {self._tenant_access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.delete(
+                    f"{FEISHU_API}/im/v1/messages/{message_id}",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("code") == 0:
+                        return True
+                    logger.debug(f"消息删除失败: {result.get('msg')}")
+                else:
+                    logger.debug(f"消息删除HTTP失败: {resp.status_code}")
+        except Exception:
+            pass
+        return False
 
     async def delete_reaction(self, message_id: str, reaction_id: str) -> bool:
         """
@@ -1728,11 +1754,27 @@ class FeishuChannel(BaseChannel):
             logger.warning(f"更新卡片失败: {e}")
 
     def reset_progress(self):
-        """重置进度状态（每次新对话开始时调用）"""
+        """重置进度状态，异步删除残留的思考/进度卡片"""
         chat_id = _active_chat_id.get()
-        if chat_id and chat_id in self._chat_states:
-            self._chat_states[chat_id]["progress_message_id"] = None
-            self._chat_states[chat_id]["thinking_card_id"] = None
+        if not chat_id or chat_id not in self._chat_states:
+            return
+        state = self._chat_states[chat_id]
+        old_thinking = state.get("thinking_card_id")
+        old_progress = state.get("progress_message_id")
+        state["progress_message_id"] = None
+        state["thinking_card_id"] = None
+
+        ids_to_delete = set()
+        if old_thinking:
+            ids_to_delete.add(old_thinking)
+        if old_progress:
+            ids_to_delete.add(old_progress)
+
+        if ids_to_delete:
+            async def _cleanup():
+                for msg_id in ids_to_delete:
+                    await self.delete_message(msg_id)
+            asyncio.create_task(_cleanup())
 
     # ==================== 按钮确认 ====================
 

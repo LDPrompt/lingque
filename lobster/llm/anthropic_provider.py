@@ -37,7 +37,7 @@ class AnthropicProvider(BaseLLMProvider):
                         {
                             "type": "tool_result",
                             "tool_use_id": msg.tool_call_id,
-                            "content": msg.content,
+                            "content": msg.content or "(empty)",
                         }
                     ],
                 })
@@ -70,7 +70,7 @@ class AnthropicProvider(BaseLLMProvider):
                     })
                 api_messages.append({"role": "user", "content": content_parts})
             else:
-                api_messages.append({"role": msg.role, "content": msg.content})
+                api_messages.append({"role": msg.role, "content": msg.content or ""})
 
         # 调用 API
         kwargs = {
