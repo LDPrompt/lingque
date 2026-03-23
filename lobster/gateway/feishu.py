@@ -1754,7 +1754,7 @@ class FeishuChannel(BaseChannel):
             logger.warning(f"更新卡片失败: {e}")
 
     def reset_progress(self):
-        """重置进度状态，异步删除残留的思考/进度卡片"""
+        """重置进度状态，将残留的思考/进度卡片更新为极简完成态"""
         chat_id = _active_chat_id.get()
         if not chat_id or chat_id not in self._chat_states:
             return
@@ -1764,16 +1764,24 @@ class FeishuChannel(BaseChannel):
         state["progress_message_id"] = None
         state["thinking_card_id"] = None
 
-        ids_to_delete = set()
+        ids_to_update = set()
         if old_thinking:
-            ids_to_delete.add(old_thinking)
+            ids_to_update.add(old_thinking)
         if old_progress:
-            ids_to_delete.add(old_progress)
+            ids_to_update.add(old_progress)
 
-        if ids_to_delete:
+        if ids_to_update:
+            done_card = {
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": "✅ 任务完成"},
+                    },
+                ],
+            }
             async def _cleanup():
-                for msg_id in ids_to_delete:
-                    await self.delete_message(msg_id)
+                for msg_id in ids_to_update:
+                    await self._update_card(msg_id, done_card)
             asyncio.create_task(_cleanup())
 
     # ==================== 按钮确认 ====================
