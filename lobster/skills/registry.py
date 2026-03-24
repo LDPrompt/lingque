@@ -153,6 +153,9 @@ class SkillRegistry:
         "已安装":  {"transplanted", "plugin"},
         "生成技能": {"skill_generator"},
         "插件":    {"plugin", "transplanted"},
+        "团队":    {"system"},
+        "组队":    {"system"},
+        "助手":    {"system"},
         "密钥":    {"credential"},
         "凭证":    {"credential"},
         "api_key": {"credential"},
@@ -161,6 +164,24 @@ class SkillRegistry:
     }
 
     _FALLBACK_CATEGORIES = {"browser", "web", "search", "scheduler", "knowledge", "workflow", "transplanted", "plugin", "mcp", "feishu"}
+
+    def get_tools_by_categories(self, categories: list[str]) -> list[dict]:
+        """根据技能类别列表返回对应的工具定义（供子 Agent 使用）"""
+        cat_set = set(categories) | set(self._ALWAYS_CATEGORIES)
+        selected = []
+        for skill in self._skills.values():
+            if skill.category in cat_set:
+                selected.append({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "parameters": skill.parameters,
+                })
+        return selected
+
+    def get_skills_by_categories(self, categories: list[str]) -> list["SkillDefinition"]:
+        """根据技能类别列表返回 SkillDefinition 列表（含 category 信息）"""
+        cat_set = set(categories) | set(self._ALWAYS_CATEGORIES)
+        return [s for s in self._skills.values() if s.category in cat_set]
 
     def select_tools_for_task(self, user_message: str,
                               recent_tool_names: list[str] | None = None) -> list[dict]:

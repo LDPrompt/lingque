@@ -18,6 +18,7 @@ from . import ralph_skills      # Ralph Loop 自主循环
 from . import mcp_skills        # MCP 包管理
 from . import knowledge_skills  # 知识图谱
 from . import credential_skills # 凭证保险箱
+from . import team_skills       # 多 Agent 团队协作
 
 # P3: 条件导入（避免未安装依赖时报错）
 try:

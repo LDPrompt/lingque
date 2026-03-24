@@ -4,6 +4,9 @@
 # 全自动：缺 Python / Git 会自动安装，用户无需手动下载任何东西
 #
 # 用法 (管理员 PowerShell):
+#   irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1 | iex
+#
+# 备用 (如 jsdelivr 不可用):
 #   irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-source.ps1 | iex
 #
 

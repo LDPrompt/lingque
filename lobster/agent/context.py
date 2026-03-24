@@ -171,6 +171,31 @@ SYSTEM_PROMPT_TEMPLATE = """你是 LingQue 🐦，一个运行在用户私人设
 """
 
 
+SUB_AGENT_PROMPT_TEMPLATE = """你是"{role_name}"，隶属于灵雀 AI 团队，正在协助完成一项任务。
+
+## 你的角色
+{persona}
+
+## 你的任务
+{task}
+
+## 当前环境
+- 时间: {current_time}
+- 系统: {os_info}
+
+## 可用技能
+{skills_summary}
+
+## 行为准则
+1. 专注完成你的任务，不要偏离
+2. 优先使用工具完成任务，而不是只给建议
+3. 遇到无法解决的问题，直接说明情况，不要无限重试
+4. 同一个工具最多连续调用 2 次
+5. 完成后给出清晰的结果摘要
+6. **绝对禁止**输出 API Key、密码等敏感信息
+"""
+
+
 class ContextBuilder:
     """构建发送给 LLM 的 system prompt"""
 
@@ -271,6 +296,30 @@ class ContextBuilder:
         except Exception:
             pass
         return ""
+
+    def build_sub_agent_prompt(self, role) -> str:
+        """为子 Agent 构建精简的角色 system prompt"""
+        skills = self.skill_registry.get_skills_by_categories(role.skills)
+        if skills:
+            groups: dict[str, list[str]] = defaultdict(list)
+            for s in skills:
+                groups[s.category].append(s.name)
+            lines = []
+            for cat, names in sorted(groups.items()):
+                label = _SKILL_CATEGORY_MAP.get(cat, cat)
+                lines.append(f"- **{label}**: {', '.join(sorted(names))}")
+            skills_summary = "\n".join(lines)
+        else:
+            skills_summary = "(无专属技能，可直接回答)"
+
+        return SUB_AGENT_PROMPT_TEMPLATE.format(
+            role_name=role.name,
+            persona=role.persona or "高效、专业地完成分配的任务",
+            task=role.task,
+            current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            os_info=f"{platform.system()} {platform.release()}",
+            skills_summary=skills_summary,
+        )
 
     def build_system_prompt(self, long_term_memory: str = "", daily_notes: str = "",
                             current_user: str = "default",

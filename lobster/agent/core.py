@@ -169,15 +169,30 @@ class Agent:
         self._confirm_callback = None
         self._progress_callback = None
         self._plan_callback = None
+        self._multi_agent_ctrl = None
 
     def set_confirm_callback(self, callback):
         self._confirm_callback = callback
 
     def set_progress_callback(self, callback):
         self._progress_callback = callback
+        if self._multi_agent_ctrl:
+            self._multi_agent_ctrl.set_progress_callback(callback)
 
     def set_plan_callback(self, callback):
         self._plan_callback = callback
+
+    def _get_multi_agent_ctrl(self):
+        """懒初始化多 Agent 控制器"""
+        if self._multi_agent_ctrl is None:
+            from .multi_agent import MultiAgentController
+            self._multi_agent_ctrl = MultiAgentController(
+                llm_router=self.llm,
+                context_builder=self.context_builder,
+            )
+            if self._progress_callback:
+                self._multi_agent_ctrl.set_progress_callback(self._progress_callback)
+        return self._multi_agent_ctrl
 
     async def _report_progress(self, step: int, total: int, skill_name: str, status: str = "running"):
         if self._progress_callback:
@@ -589,6 +604,21 @@ class Agent:
                 logger.warning("规划步骤超时(20s)，跳过")
             except Exception as e:
                 logger.warning(f"规划步骤失败，跳过: {e}")
+
+        # === 多 Agent 团队模式 ===
+        from .multi_agent import MultiAgentController
+        if MultiAgentController.should_use_team(user_input):
+            try:
+                ctrl = self._get_multi_agent_ctrl()
+                logger.info("检测到可并行拆分任务，尝试团队模式")
+                team_result = await ctrl.process(user_input)
+                if team_result:
+                    self.memory.add_message(Message(role="assistant", content=team_result))
+                    from .memory import redact_secrets
+                    return redact_secrets(team_result)
+                logger.info("团队模式未采纳（LLM 判断不需要拆分），降级为单 Agent")
+            except Exception as e:
+                logger.warning(f"团队模式异常，降级为单 Agent: {e}")
 
         # 长任务自动续航: 总步数上限 = max_loops * (1 + auto_continue)
         max_total_steps = self.max_loops * (1 + self._auto_continue)

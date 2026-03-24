@@ -409,6 +409,10 @@ async def main():
         agent_config=config.agent,
     )
 
+    # 多 Agent 团队技能
+    from .skills.team_skills import set_agent_for_team
+    set_agent_for_team(agent)
+
     # 技能移植器
     transplanter = SkillTransplanter(
         llm_router=llm_router,

@@ -4,6 +4,9 @@
 # 全自动：缺 Docker Desktop / Git 会自动安装，用户无需手动下载任何东西
 #
 # 用法 (管理员 PowerShell):
+#   irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1 | iex
+#
+# 备用 (如 jsdelivr 不可用):
 #   irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-docker.ps1 | iex
 #
 
@@ -333,7 +336,7 @@ if ($needReboot) {
     Write-Host "  2. 等待 Docker 图标变为稳定状态 (约 1 分钟)" -ForegroundColor Cyan
     Write-Host "  3. 重新打开 PowerShell (管理员)，再次运行:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "     irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-docker.ps1 | iex" -ForegroundColor White
+    Write-Host "     irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1 | iex" -ForegroundColor White
     Write-Host ""
 
     $rebootNow = Read-Host "是否立即重启电脑? [Y/n]"
@@ -376,12 +379,56 @@ Set-Location $InstallDir
 # ── 配置 .env ──
 Setup-Env
 
+# ── 修复 Docker 镜像源（国内常见问题）──
+$dockerConfigPath = "$env:USERPROFILE\.docker\daemon.json"
+if (Test-Path $dockerConfigPath) {
+    try {
+        $daemonJson = Get-Content $dockerConfigPath -Raw -ErrorAction SilentlyContinue
+        if ($daemonJson -match "mirrors\.ustc\.edu\.cn|mirrors\.aliyun\.com|registry\.docker-cn\.com|mirror\.ccs\.tencentyun\.com") {
+            Warn "检测到可能失效的 Docker 镜像源，正在自动修复..."
+            $daemonObj = $daemonJson | ConvertFrom-Json
+            if ($daemonObj."registry-mirrors") {
+                $daemonObj."registry-mirrors" = @()
+                $daemonObj | ConvertTo-Json -Depth 10 | Set-Content $dockerConfigPath -Encoding UTF8
+                Log "已清除失效的 Docker 镜像源配置，正在重启 Docker..."
+                docker system info 2>$null | Out-Null
+                Start-Sleep -Seconds 3
+                Ok "Docker 镜像源已修复（使用官方源）"
+            }
+        }
+    } catch {
+        Warn "Docker 镜像源检测跳过: $_"
+    }
+}
+
 # ── 构建并启动 ──
 Write-Host ""
 Log "正在构建并启动 Docker 容器 (首次约需 3-8 分钟，请耐心等待)..."
 docker compose up -d --build
 if ($LASTEXITCODE -ne 0) {
-    Err "Docker 启动失败，请确认 Docker Desktop 正在运行"
+    Write-Host ""
+    Warn "Docker 构建失败，正在诊断原因..."
+    $pullTest = docker pull hello-world 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $pullOutput = "$pullTest"
+        if ($pullOutput -match "no such host|timeout|connection refused|TLS handshake") {
+            Write-Host ""
+            Write-Host "  问题原因: Docker 无法访问镜像仓库（网络/镜像源问题）" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "  解决方法:" -ForegroundColor Yellow
+            Write-Host "  1. 打开 Docker Desktop → 设置(Settings) → Docker Engine" -ForegroundColor Cyan
+            Write-Host "  2. 找到 registry-mirrors 那一行，清空为: ""registry-mirrors"": []" -ForegroundColor Cyan
+            Write-Host "  3. 点击 Apply & Restart" -ForegroundColor Cyan
+            Write-Host "  4. 等 Docker 重启完毕后，重新运行本安装脚本" -ForegroundColor Cyan
+            Write-Host ""
+            Read-Host "按回车退出"
+            exit 1
+        } else {
+            Err "Docker 启动失败，请确认 Docker Desktop 正在运行"
+        }
+    } else {
+        Err "Docker 容器构建失败，请查看上方错误信息后重试"
+    }
 }
 
 # ── 清理临时文件 ──
