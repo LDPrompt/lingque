@@ -1,7 +1,7 @@
 """
 灵雀 - 多 Agent 团队技能
 
-提供团队状态查看和强制团队模式触发。
+提供团队状态查看、强制团队模式触发、取消正在执行的团队任务。
 """
 
 import logging
@@ -19,7 +19,7 @@ def set_agent_for_team(agent):
 
 @register(
     name="team_status",
-    description="查看当前多 Agent 团队的运行状态，包括各角色的执行情况",
+    description="查看当前多 Agent 团队的运行状态，包括各角色的执行情况。如果没有正在执行的团队，会显示上一次的团队记录。",
     parameters={"type": "object", "properties": {}},
     risk_level="low",
     category="system",
@@ -65,3 +65,23 @@ async def team_execute(task: str) -> SkillResult:
     except Exception as e:
         logger.error(f"团队执行失败: {e}")
         return SkillResult(success=False, error=f"团队执行失败: {e}")
+
+
+@register(
+    name="team_cancel",
+    description="取消正在执行的多 Agent 团队任务。已完成的子任务结果会保留。",
+    parameters={"type": "object", "properties": {}},
+    risk_level="low",
+    category="system",
+)
+async def team_cancel() -> SkillResult:
+    if not _agent:
+        return SkillResult(success=True, data="团队系统未初始化。")
+    try:
+        ctrl = _agent._get_multi_agent_ctrl()
+        if not ctrl._current_team:
+            return SkillResult(success=True, data="当前没有团队在执行任务。")
+        ctrl.cancel()
+        return SkillResult(success=True, data="已发送取消信号，团队任务将在当前步骤完成后停止。")
+    except Exception as e:
+        return SkillResult(success=False, error=f"取消失败: {e}")
