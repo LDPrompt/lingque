@@ -306,10 +306,15 @@ if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
 
 # ── 检查 / 安装 Python ──
 $pythonCmd = $null
-foreach ($cmd in @("python", "python3", "py")) {
+foreach ($cmd in @("python", "python3", "py -3.12", "py -3.11", "py")) {
     try {
-        $ver = & $cmd --version 2>&1
-        if ($ver -match "(\d+)\.(\d+)") {
+        $cmdParts = $cmd -split " "
+        if ($cmdParts.Length -gt 1) {
+            $ver = & $cmdParts[0] $cmdParts[1] --version 2>&1
+        } else {
+            $ver = & $cmd --version 2>&1
+        }
+        if ("$ver" -match "(\d+)\.(\d+)") {
             if ([int]$Matches[1] -ge 3 -and [int]$Matches[2] -ge 11) {
                 $pythonCmd = $cmd
                 break
@@ -324,10 +329,16 @@ if (-not $pythonCmd) {
     if (-not $pyOk) {
         Err "Python 自动安装失败，请手动安装: https://www.python.org/downloads/"
     }
-    foreach ($cmd in @("python", "python3", "py")) {
+    Refresh-Path
+    foreach ($cmd in @("python", "python3", "py -3.12", "py -3.11", "py")) {
         try {
-            $ver = & $cmd --version 2>&1
-            if ($ver -match "(\d+)\.(\d+)") {
+            $cmdParts = $cmd -split " "
+            if ($cmdParts.Length -gt 1) {
+                $ver = & $cmdParts[0] $cmdParts[1] --version 2>&1
+            } else {
+                $ver = & $cmd --version 2>&1
+            }
+            if ("$ver" -match "(\d+)\.(\d+)") {
                 if ([int]$Matches[1] -ge 3 -and [int]$Matches[2] -ge 11) {
                     $pythonCmd = $cmd
                     break
@@ -428,7 +439,12 @@ Set-Location $InstallDir
 # ── 虚拟环境 ──
 Write-Host ""
 Log "正在创建 Python 虚拟环境..."
-& $pythonCmd -m venv venv
+$cmdParts = $pythonCmd -split " "
+if ($cmdParts.Length -gt 1) {
+    & $cmdParts[0] $cmdParts[1] -m venv venv
+} else {
+    & $pythonCmd -m venv venv
+}
 if ($LASTEXITCODE -ne 0) { Err "虚拟环境创建失败" }
 & ".\venv\Scripts\Activate.ps1"
 Ok "虚拟环境已创建"
