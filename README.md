@@ -284,12 +284,12 @@ steps:
 
 **源码版**（推荐新手）：
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $f="$env:TEMP\dl.ps1"; $ok=$false; foreach($h in @("cdn.jsdmirror.com","gcore.jsdelivr.net","cdn.jsdelivr.net")){ if(-not $ok){ try{ (New-Object Net.WebClient).DownloadFile("https://$h/gh/LDPrompt/lingque@main/scripts/install-source.ps1",$f); $ok=$true }catch{} } }; if(-not $ok){ Write-Host "[ERR] All CDN failed" -ForegroundColor Red; pause; exit 1 }; [IO.File]::ReadAllText($f,[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
 ```
 
 **Docker 版**（推荐有基础的用户）：
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $f="$env:TEMP\dl.ps1"; $ok=$false; foreach($h in @("cdn.jsdmirror.com","gcore.jsdelivr.net","cdn.jsdelivr.net")){ if(-not $ok){ try{ (New-Object Net.WebClient).DownloadFile("https://$h/gh/LDPrompt/lingque@main/scripts/install-docker.ps1",$f); $ok=$true }catch{} } }; if(-not $ok){ Write-Host "[ERR] All CDN failed" -ForegroundColor Red; pause; exit 1 }; [IO.File]::ReadAllText($f,[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
 ```
 
 ---

@@ -3,12 +3,6 @@
 #
 # 全自动：缺 Docker Desktop / Git 会自动安装，用户无需手动下载任何东西
 #
-# 用法 (管理员 PowerShell):
-#   irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1 | iex
-#
-# 备用 (如 jsdelivr 不可用):
-#   irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-docker.ps1 | iex
-#
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -70,6 +64,59 @@ function Ensure-TempDir {
     }
 }
 
+function Find-DockerDesktopExe {
+    $candidates = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+        "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+    $reg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop" -ErrorAction SilentlyContinue
+    if ($reg -and $reg.InstallLocation) {
+        $exe = Join-Path $reg.InstallLocation "Docker Desktop.exe"
+        if (Test-Path $exe) { return $exe }
+    }
+    $reg2 = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop" -ErrorAction SilentlyContinue
+    if ($reg2 -and $reg2.InstallLocation) {
+        $exe2 = Join-Path $reg2.InstallLocation "Docker Desktop.exe"
+        if (Test-Path $exe2) { return $exe2 }
+    }
+    return $null
+}
+
+function Ensure-DockerInPath {
+    $cliPaths = @(
+        "C:\Program Files\Docker\Docker\resources\bin",
+        "C:\Program Files\Docker\Docker"
+    )
+    foreach ($p in $cliPaths) {
+        if ((Test-Path "$p\docker.exe") -and ($env:PATH -notlike "*$p*")) {
+            $env:PATH += ";$p"
+        }
+    }
+}
+
+function Wait-ForDockerReady {
+    param([int]$TimeoutSeconds = 120)
+    $waited = 0
+    while ($waited -lt $TimeoutSeconds) {
+        Start-Sleep -Seconds 5
+        $waited += 5
+        Refresh-Path
+        Ensure-DockerInPath
+        try {
+            docker info *>$null
+            if ($LASTEXITCODE -eq 0) {
+                return $true
+            }
+        } catch {}
+        Write-Host "  等待 Docker 启动中... ($waited/$TimeoutSeconds 秒)" -ForegroundColor DarkGray
+    }
+    return $false
+}
+
 # =====================================================================
 # 自动安装 Git
 # =====================================================================
@@ -95,7 +142,7 @@ function Install-GitAuto {
         if ($asset) {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
         } else {
-            throw "未找到安装包"
+            throw "no asset"
         }
     } catch {
         Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/Git-2.47.1.2-64-bit.exe" -OutFile $gitInstaller -UseBasicParsing
@@ -126,40 +173,81 @@ function Install-GitAuto {
 function Install-DockerAuto {
     Log "正在自动安装 Docker Desktop..."
 
+    $installed = $false
+
     if (Has-Winget) {
-        Log "使用 winget 安装 Docker Desktop..."
-        winget install Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent
-        if ($LASTEXITCODE -eq 0) {
-            Refresh-Path
-            Ok "Docker Desktop 安装完成"
-            return "winget"
-        }
-    }
-
-    Log "正在下载 Docker Desktop 安装包 (约 500MB，请耐心等待)..."
-    Ensure-TempDir
-    $dockerInstaller = "$TempDir\DockerDesktopInstaller.exe"
-    $dockerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-    try {
-        Start-BitsTransfer -Source $dockerUrl -Destination $dockerInstaller -Description "下载 Docker Desktop" -ErrorAction Stop
-    } catch {
-        Log "BITS 下载失败，尝试备用方式..."
-        try {
-            (New-Object Net.WebClient).DownloadFile($dockerUrl, $dockerInstaller)
-        } catch {
-            Err "Docker Desktop 下载失败，请手动下载: https://www.docker.com/products/docker-desktop/"
-        }
-    }
-
-    if (Test-Path $dockerInstaller) {
-        Log "正在安装 Docker Desktop (静默安装，约需 2-5 分钟)..."
-        Start-Process -FilePath $dockerInstaller -ArgumentList "install", "--quiet", "--accept-license" -Wait
+        Log "使用 winget 安装 Docker Desktop (可能需要几分钟)..."
+        $wingetOutput = winget install Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent 2>&1
+        Write-Host $wingetOutput -ForegroundColor DarkGray
         Refresh-Path
-        Ok "Docker Desktop 安装完成"
-        return "downloaded"
+        Ensure-DockerInPath
+        if (Find-DockerDesktopExe) {
+            $installed = $true
+            Ok "Docker Desktop (winget) 安装完成"
+        } else {
+            Warn "winget 安装后未检测到 Docker Desktop，尝试直接下载..."
+        }
     }
 
-    return $false
+    if (-not $installed) {
+        Log "正在下载 Docker Desktop 安装包 (约 500MB)..."
+        Log "下载过程会显示进度条，请耐心等待..."
+        Ensure-TempDir
+        $dockerInstaller = "$TempDir\DockerDesktopInstaller.exe"
+        $dockerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+
+        $downloadOk = $false
+        try {
+            Start-BitsTransfer -Source $dockerUrl -Destination $dockerInstaller -Description "Docker Desktop" -ErrorAction Stop
+            $downloadOk = $true
+        } catch {
+            Warn "BITS 下载失败，尝试 WebClient 方式..."
+            try {
+                $wc = New-Object Net.WebClient
+                $wc.DownloadFile($dockerUrl, $dockerInstaller)
+                $downloadOk = $true
+            } catch {
+                Warn "WebClient 下载也失败"
+            }
+        }
+
+        if ($downloadOk -and (Test-Path $dockerInstaller)) {
+            $fileSize = (Get-Item $dockerInstaller).Length / 1MB
+            if ($fileSize -lt 100) {
+                Warn "下载文件异常 (${fileSize}MB)，可能下载不完整"
+            } else {
+                Log "正在安装 Docker Desktop (静默安装，约需 2-5 分钟)..."
+                Start-Process -FilePath $dockerInstaller -ArgumentList "install", "--quiet", "--accept-license" -Wait
+                Refresh-Path
+                Ensure-DockerInPath
+                if (Find-DockerDesktopExe) {
+                    $installed = $true
+                    Ok "Docker Desktop 安装完成"
+                }
+            }
+        }
+    }
+
+    if (-not $installed) {
+        return $false
+    }
+
+    $ddExe = Find-DockerDesktopExe
+    if ($ddExe) {
+        Log "正在启动 Docker Desktop..."
+        Start-Process $ddExe
+        Log "等待 Docker 引擎就绪 (首次启动可能需要 1-2 分钟)..."
+        if (Wait-ForDockerReady -TimeoutSeconds 120) {
+            Ok "Docker Desktop 已启动并就绪"
+            return "ready"
+        } else {
+            Warn "Docker Desktop 已安装但引擎尚未就绪"
+            Warn "如果是第一次安装，Docker Desktop 可能需要初始化 WSL/Hyper-V"
+            return "installed-not-ready"
+        }
+    }
+
+    return "installed-not-found"
 }
 
 # =====================================================================
@@ -281,8 +369,6 @@ function Setup-Env {
 Log "正在检查系统环境..."
 Write-Host ""
 
-$needReboot = $false
-
 # ── 检查 / 安装 Git ──
 if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
     Warn "未检测到 Git，即将自动安装..."
@@ -296,24 +382,16 @@ if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
 
 # ── 检查 / 安装 Docker Desktop ──
 $dockerReady = $false
-$dockerExePath = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-$dockerCliPaths = @(
-    "C:\Program Files\Docker\Docker\resources\bin",
-    "C:\Program Files\Docker\Docker"
-)
+Refresh-Path
+Ensure-DockerInPath
 
-foreach ($p in $dockerCliPaths) {
-    if ((Test-Path "$p\docker.exe") -and ($env:PATH -notmatch [regex]::Escape($p))) {
-        $env:PATH += ";$p"
-    }
-}
+$ddExe = Find-DockerDesktopExe
+$dockerCmd = Get-Command "docker" -ErrorAction SilentlyContinue
 
-$dockerInstalled = (Get-Command "docker" -ErrorAction SilentlyContinue) -or (Test-Path $dockerExePath)
-
-if ($dockerInstalled) {
-    if (Get-Command "docker" -ErrorAction SilentlyContinue) {
+if ($dockerCmd -or $ddExe) {
+    if ($dockerCmd) {
         try {
-            docker info 2>$null | Out-Null
+            docker info *>$null
             if ($LASTEXITCODE -eq 0) {
                 Ok "Docker Desktop 已就绪: $(docker --version)"
                 $dockerReady = $true
@@ -321,66 +399,74 @@ if ($dockerInstalled) {
         } catch {}
     }
 
-    if (-not $dockerReady) {
-        Warn "Docker Desktop 已安装但未启动"
-        if (Test-Path $dockerExePath) {
-            Log "正在启动 Docker Desktop..."
-            Start-Process $dockerExePath
-            Log "等待 Docker Desktop 启动 (最多 90 秒)..."
-            $waited = 0
-            while ($waited -lt 90) {
-                Start-Sleep -Seconds 5
-                $waited += 5
-                Refresh-Path
-                try {
-                    docker info 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) {
-                        $dockerReady = $true
-                        break
-                    }
-                } catch {}
-                Write-Host "  等待中... ($waited 秒)" -ForegroundColor DarkGray
-            }
+    if (-not $dockerReady -and $ddExe) {
+        Warn "Docker Desktop 已安装但未运行，正在启动..."
+        Start-Process $ddExe
+        Log "等待 Docker Desktop 就绪 (最多 120 秒)..."
+        if (Wait-ForDockerReady -TimeoutSeconds 120) {
+            Ok "Docker Desktop 已就绪: $(docker --version)"
+            $dockerReady = $true
+        } else {
+            Write-Host ""
+            Write-Host "  Docker Desktop 启动超时，请尝试:" -ForegroundColor Yellow
+            Write-Host "  1. 手动双击桌面上的 Docker Desktop 图标" -ForegroundColor Cyan
+            Write-Host "  2. 等待任务栏鲸鱼图标稳定 (不再转圈)" -ForegroundColor Cyan
+            Write-Host "  3. 重新运行安装命令" -ForegroundColor Cyan
+            Write-Host ""
+            Read-Host "按回车退出"
+            exit 1
         }
-        if (-not $dockerReady) {
-            Err "Docker Desktop 启动超时，请手动启动 Docker Desktop 后重新运行此脚本"
-        }
-        Ok "Docker Desktop 已启动"
+    }
+
+    if (-not $dockerReady -and -not $ddExe) {
+        Err "检测到 docker 命令但找不到 Docker Desktop，请手动启动 Docker Desktop 后重试"
     }
 } else {
     Warn "未检测到 Docker Desktop，即将自动安装..."
     $dockerResult = Install-DockerAuto
-    if (-not $dockerResult) {
-        Err "Docker Desktop 自动安装失败，请手动安装: https://www.docker.com/products/docker-desktop/"
-    }
-    $needReboot = $true
-}
 
-if ($needReboot) {
-    Write-Host ""
-    Write-Host "  ============================================" -ForegroundColor Yellow
-    Write-Host "  Docker Desktop 已安装，需要重启电脑后生效" -ForegroundColor Yellow
-    Write-Host "  ============================================" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  重启后请按以下步骤继续:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  1. 启动 Docker Desktop (桌面图标)" -ForegroundColor Cyan
-    Write-Host "  2. 等待 Docker 图标变为稳定状态 (约 1 分钟)" -ForegroundColor Cyan
-    Write-Host "  3. 重新打开 PowerShell (管理员)，再次运行:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host '     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"' -ForegroundColor White
-    Write-Host ""
-
-    $rebootNow = Read-Host "是否立即重启电脑? [Y/n]"
-    if ($rebootNow -ne "n" -and $rebootNow -ne "N") {
-        Restart-Computer -Force
+    if ($dockerResult -eq $false) {
+        Write-Host ""
+        Write-Host "  Docker Desktop 自动安装失败，请手动安装:" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  1. 浏览器打开: https://www.docker.com/products/docker-desktop/" -ForegroundColor Cyan
+        Write-Host "  2. 点击 Download for Windows 下载" -ForegroundColor Cyan
+        Write-Host "  3. 双击安装，一路默认下一步" -ForegroundColor Cyan
+        Write-Host "  4. 安装完启动 Docker Desktop" -ForegroundColor Cyan
+        Write-Host "  5. 等鲸鱼图标稳定后，重新运行安装命令" -ForegroundColor Cyan
+        Write-Host ""
+        Read-Host "按回车退出"
+        exit 1
     }
-    exit 0
+
+    if ($dockerResult -eq "ready") {
+        $dockerReady = $true
+    } elseif ($dockerResult -eq "installed-not-ready") {
+        Write-Host ""
+        Write-Host "  Docker Desktop 已安装但引擎尚未就绪" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  可能原因: 首次安装需要初始化 WSL2 / Hyper-V" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  请操作:" -ForegroundColor White
+        Write-Host "  1. 如果弹出窗口要求启用 WSL2 或 Hyper-V，请同意" -ForegroundColor Cyan
+        Write-Host "  2. 如果提示需要重启，请重启电脑" -ForegroundColor Cyan
+        Write-Host "  3. 重启后，先手动打开 Docker Desktop" -ForegroundColor Cyan
+        Write-Host "  4. 等鲸鱼图标稳定后，重新运行安装命令" -ForegroundColor Cyan
+        Write-Host ""
+        Read-Host "按回车退出"
+        exit 0
+    } else {
+        Write-Host ""
+        Write-Host "  Docker Desktop 安装异常，请手动启动后重试" -ForegroundColor Yellow
+        Write-Host ""
+        Read-Host "按回车退出"
+        exit 1
+    }
 }
 
 # ── 检查 docker compose ──
 try {
-    docker compose version 2>$null | Out-Null
+    docker compose version *>$null
     if ($LASTEXITCODE -ne 0) { throw "no compose" }
     Ok "docker compose 已就绪"
 } catch {
@@ -447,7 +533,7 @@ if (-not $cloneOk) {
     Write-Host ""
     Write-Host "  所有下载方式均失败，请尝试:" -ForegroundColor Red
     Write-Host "  1. 开启 VPN/代理后重新运行本脚本" -ForegroundColor Cyan
-    Write-Host "  2. 手动下载: 浏览器打开 https://github.com/LDPrompt/lingque → Code → Download ZIP" -ForegroundColor Cyan
+    Write-Host "  2. 手动下载: 浏览器打开 https://github.com/LDPrompt/lingque -> Code -> Download ZIP" -ForegroundColor Cyan
     Write-Host "     解压到 $InstallDir 后重新运行此脚本" -ForegroundColor Cyan
     Write-Host ""
     Read-Host "按回车退出"
@@ -519,26 +605,19 @@ if (Test-Path $ddSettingsPath) {
 
 if ($mirrorFixed) {
     Log "镜像源已修复，正在重启 Docker Desktop..."
-    $dockerExe = Get-ChildItem "C:\Program Files\Docker\Docker\Docker Desktop.exe" -ErrorAction SilentlyContinue
-    if ($dockerExe) {
+    $ddExeRestart = Find-DockerDesktopExe
+    if ($ddExeRestart) {
         Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
-        Start-Process $dockerExe.FullName
-        Log "等待 Docker Desktop 重启 (最多 60 秒)..."
-        $waited = 0
-        while ($waited -lt 60) {
-            Start-Sleep -Seconds 5
-            $waited += 5
-            try {
-                docker info 2>$null | Out-Null
-                if ($LASTEXITCODE -eq 0) { break }
-            } catch {}
-            Write-Host "  等待中... ($waited 秒)" -ForegroundColor DarkGray
+        Start-Process $ddExeRestart
+        Log "等待 Docker Desktop 重启..."
+        if (-not (Wait-ForDockerReady -TimeoutSeconds 60)) {
+            Warn "Docker Desktop 重启后未就绪，请手动检查"
         }
     } else {
         Start-Sleep -Seconds 5
     }
-    Ok "Docker 镜像源修复完成（已切换为官方源）"
+    Ok "Docker 镜像源修复完成"
 }
 
 # ── 构建并启动 ──
@@ -553,11 +632,11 @@ if ($LASTEXITCODE -ne 0) {
         $pullOutput = "$pullTest"
         if ($pullOutput -match "no such host|timeout|connection refused|TLS handshake") {
             Write-Host ""
-            Write-Host "  问题原因: Docker 无法访问镜像仓库（网络/镜像源问题）" -ForegroundColor Red
+            Write-Host "  问题原因: Docker 无法访问镜像仓库 (网络/镜像源问题)" -ForegroundColor Red
             Write-Host ""
             Write-Host "  解决方法:" -ForegroundColor Yellow
-            Write-Host "  1. 打开 Docker Desktop → 设置(Settings) → Docker Engine" -ForegroundColor Cyan
-            Write-Host "  2. 找到 registry-mirrors 那一行，清空为: ""registry-mirrors"": []" -ForegroundColor Cyan
+            Write-Host "  1. 打开 Docker Desktop -> 设置(Settings) -> Docker Engine" -ForegroundColor Cyan
+            Write-Host '  2. 找到 registry-mirrors 那一行，清空为: "registry-mirrors": []' -ForegroundColor Cyan
             Write-Host "  3. 点击 Apply & Restart" -ForegroundColor Cyan
             Write-Host "  4. 等 Docker 重启完毕后，重新运行本安装脚本" -ForegroundColor Cyan
             Write-Host ""
