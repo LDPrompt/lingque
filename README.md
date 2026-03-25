@@ -284,12 +284,12 @@ steps:
 
 **源码版**（推荐新手）：
 ```powershell
-Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
 ```
 
 **Docker 版**（推荐有基础的用户）：
 ```powershell
-Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
 ```
 
 ---

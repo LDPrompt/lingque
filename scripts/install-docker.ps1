@@ -347,7 +347,7 @@ if ($needReboot) {
     Write-Host "  2. 等待 Docker 图标变为稳定状态 (约 1 分钟)" -ForegroundColor Cyan
     Write-Host "  3. 重新打开 PowerShell (管理员)，再次运行:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host '     Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"' -ForegroundColor White
+    Write-Host '     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile("https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1","$env:TEMP\dl.ps1"); [IO.File]::ReadAllText("$env:TEMP\dl.ps1",[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"' -ForegroundColor White
     Write-Host ""
 
     $rebootNow = Read-Host "是否立即重启电脑? [Y/n]"
