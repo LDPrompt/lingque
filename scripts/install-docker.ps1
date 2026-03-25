@@ -10,6 +10,11 @@
 #   irm https://raw.githubusercontent.com/LDPrompt/lingque/main/scripts/install-docker.ps1 | iex
 #
 
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 try {
     if ((Get-ExecutionPolicy -Scope Process) -eq "Restricted") {
         Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
