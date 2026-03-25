@@ -1,4 +1,4 @@
-#
+﻿#
 # 灵雀一键升级脚本 (Windows PowerShell)
 #
 # 用法:

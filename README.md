@@ -284,12 +284,12 @@ steps:
 
 **源码版**（推荐新手）：
 ```powershell
-irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1 | iex
+Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-source.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"
 ```
 
 **Docker 版**（推荐有基础的用户）：
 ```powershell
-irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1 | iex
+Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"
 ```
 
 ---

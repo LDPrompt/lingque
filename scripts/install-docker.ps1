@@ -1,4 +1,4 @@
-#
+﻿#
 # 🐦 灵雀 LingQue 一键安装 — Docker 版 (Windows)
 #
 # 全自动：缺 Docker Desktop / Git 会自动安装，用户无需手动下载任何东西
@@ -347,7 +347,7 @@ if ($needReboot) {
     Write-Host "  2. 等待 Docker 图标变为稳定状态 (约 1 分钟)" -ForegroundColor Cyan
     Write-Host "  3. 重新打开 PowerShell (管理员)，再次运行:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "     irm https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1 | iex" -ForegroundColor White
+    Write-Host '     Invoke-WebRequest "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/scripts/install-docker.ps1" -OutFile "$env:TEMP\lingque-install.ps1"; & "$env:TEMP\lingque-install.ps1"' -ForegroundColor White
     Write-Host ""
 
     $rebootNow = Read-Host "是否立即重启电脑? [Y/n]"
