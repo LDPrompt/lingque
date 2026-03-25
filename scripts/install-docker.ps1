@@ -141,9 +141,14 @@ function Install-DockerAuto {
     $dockerInstaller = "$TempDir\DockerDesktopInstaller.exe"
     $dockerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
     try {
-        Invoke-WebRequest -Uri $dockerUrl -OutFile $dockerInstaller -UseBasicParsing
+        Start-BitsTransfer -Source $dockerUrl -Destination $dockerInstaller -Description "下载 Docker Desktop" -ErrorAction Stop
     } catch {
-        Err "Docker Desktop 下载失败，请检查网络后重试"
+        Log "BITS 下载失败，尝试备用方式..."
+        try {
+            (New-Object Net.WebClient).DownloadFile($dockerUrl, $dockerInstaller)
+        } catch {
+            Err "Docker Desktop 下载失败，请手动下载: https://www.docker.com/products/docker-desktop/"
+        }
     }
 
     if (Test-Path $dockerInstaller) {
@@ -291,26 +296,42 @@ if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
 
 # ── 检查 / 安装 Docker Desktop ──
 $dockerReady = $false
-if (Get-Command "docker" -ErrorAction SilentlyContinue) {
-    try {
-        docker info 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Ok "Docker Desktop 已就绪: $(docker --version)"
-            $dockerReady = $true
-        }
-    } catch {}
+$dockerExePath = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+$dockerCliPaths = @(
+    "C:\Program Files\Docker\Docker\resources\bin",
+    "C:\Program Files\Docker\Docker"
+)
+
+foreach ($p in $dockerCliPaths) {
+    if ((Test-Path "$p\docker.exe") -and ($env:PATH -notmatch [regex]::Escape($p))) {
+        $env:PATH += ";$p"
+    }
+}
+
+$dockerInstalled = (Get-Command "docker" -ErrorAction SilentlyContinue) -or (Test-Path $dockerExePath)
+
+if ($dockerInstalled) {
+    if (Get-Command "docker" -ErrorAction SilentlyContinue) {
+        try {
+            docker info 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Ok "Docker Desktop 已就绪: $(docker --version)"
+                $dockerReady = $true
+            }
+        } catch {}
+    }
 
     if (-not $dockerReady) {
-        Warn "Docker 已安装但未启动"
-        Log "正在尝试启动 Docker Desktop..."
-        $dockerExe = Get-ChildItem "C:\Program Files\Docker\Docker\Docker Desktop.exe" -ErrorAction SilentlyContinue
-        if ($dockerExe) {
-            Start-Process $dockerExe.FullName
-            Log "等待 Docker Desktop 启动 (最多 60 秒)..."
+        Warn "Docker Desktop 已安装但未启动"
+        if (Test-Path $dockerExePath) {
+            Log "正在启动 Docker Desktop..."
+            Start-Process $dockerExePath
+            Log "等待 Docker Desktop 启动 (最多 90 秒)..."
             $waited = 0
-            while ($waited -lt 60) {
+            while ($waited -lt 90) {
                 Start-Sleep -Seconds 5
                 $waited += 5
+                Refresh-Path
                 try {
                     docker info 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) {
