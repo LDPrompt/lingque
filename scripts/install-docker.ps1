@@ -24,6 +24,12 @@ function Warn($msg) { Write-Host "[!!] $msg" -ForegroundColor Yellow }
 function Err($msg)  { Write-Host "[ERR] $msg" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
 
 $RepoUrl = "https://github.com/LDPrompt/lingque.git"
+$RepoMirrors = @(
+    "https://ghproxy.net/https://github.com/LDPrompt/lingque.git",
+    "https://mirror.ghproxy.com/https://github.com/LDPrompt/lingque.git",
+    "https://gh-proxy.com/https://github.com/LDPrompt/lingque.git"
+)
+$ZipGitHub = "https://github.com/LDPrompt/lingque/archive/refs/heads/main.zip"
 $InstallDir = if ($env:LINGQUE_INSTALL_DIR) { $env:LINGQUE_INSTALL_DIR } else { "$env:USERPROFILE\lingque" }
 $TempDir = "$env:TEMP\lingque_setup"
 
@@ -370,8 +376,57 @@ if (Test-Path $InstallDir) {
     Remove-Item $InstallDir -Recurse -Force
 }
 
-git clone --depth 1 $RepoUrl $InstallDir
-if ($LASTEXITCODE -ne 0) { Err "下载失败，请检查网络连接后重试" }
+$cloneOk = $false
+
+git clone --depth 1 $RepoUrl $InstallDir 2>$null
+if ($LASTEXITCODE -eq 0) {
+    $cloneOk = $true
+} else {
+    Warn "GitHub 直连失败，尝试镜像加速..."
+    if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($mirror in $RepoMirrors) {
+        Log "尝试: $mirror"
+        git clone --depth 1 $mirror $InstallDir 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $cloneOk = $true
+            break
+        }
+        if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+if (-not $cloneOk) {
+    Warn "Git 克隆均失败，尝试下载 ZIP 包..."
+    if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
+    $zipFile = "$TempDir\lingque.zip"
+    try {
+        Invoke-WebRequest -Uri $ZipGitHub -OutFile $zipFile -UseBasicParsing -TimeoutSec 60
+        if (Test-Path $zipFile) {
+            Log "正在解压..."
+            Expand-Archive -Path $zipFile -DestinationPath $TempDir -Force
+            $extracted = Get-ChildItem "$TempDir\lingque-*" -Directory | Select-Object -First 1
+            if ($extracted) {
+                if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
+                Move-Item $extracted.FullName $InstallDir
+                Ok "ZIP 下载解压完成"
+                $cloneOk = $true
+            }
+        }
+    } catch {
+        Warn "ZIP 下载也失败"
+    }
+}
+
+if (-not $cloneOk) {
+    Write-Host ""
+    Write-Host "  所有下载方式均失败，请尝试:" -ForegroundColor Red
+    Write-Host "  1. 开启 VPN/代理后重新运行本脚本" -ForegroundColor Cyan
+    Write-Host "  2. 手动下载: 浏览器打开 https://github.com/LDPrompt/lingque → Code → Download ZIP" -ForegroundColor Cyan
+    Write-Host "     解压到 $InstallDir 后重新运行此脚本" -ForegroundColor Cyan
+    Write-Host ""
+    Read-Host "按回车退出"
+    exit 1
+}
 Ok "下载完成"
 
 Set-Location $InstallDir
@@ -380,25 +435,84 @@ Set-Location $InstallDir
 Setup-Env
 
 # ── 修复 Docker 镜像源（国内常见问题）──
+$mirrorPattern = "mirrors\.ustc\.edu\.cn|mirrors\.aliyun\.com|registry\.docker-cn\.com|mirror\.ccs\.tencentyun\.com|docker\.mirrors\.|mirror\.baidubce\.com|hub-mirror\.c\.163\.com|dockerhub\.azk8s\.cn"
+$mirrorFixed = $false
+
 $dockerConfigPath = "$env:USERPROFILE\.docker\daemon.json"
 if (Test-Path $dockerConfigPath) {
     try {
         $daemonJson = Get-Content $dockerConfigPath -Raw -ErrorAction SilentlyContinue
-        if ($daemonJson -match "mirrors\.ustc\.edu\.cn|mirrors\.aliyun\.com|registry\.docker-cn\.com|mirror\.ccs\.tencentyun\.com") {
-            Warn "检测到可能失效的 Docker 镜像源，正在自动修复..."
+        if ($daemonJson -match $mirrorPattern) {
+            Warn "检测到失效的 Docker 镜像源 (daemon.json)，正在修复..."
             $daemonObj = $daemonJson | ConvertFrom-Json
             if ($daemonObj."registry-mirrors") {
                 $daemonObj."registry-mirrors" = @()
                 $daemonObj | ConvertTo-Json -Depth 10 | Set-Content $dockerConfigPath -Encoding UTF8
-                Log "已清除失效的 Docker 镜像源配置，正在重启 Docker..."
-                docker system info 2>$null | Out-Null
-                Start-Sleep -Seconds 3
-                Ok "Docker 镜像源已修复（使用官方源）"
+                $mirrorFixed = $true
+                Ok "daemon.json 镜像源已清除"
             }
         }
     } catch {
-        Warn "Docker 镜像源检测跳过: $_"
+        Warn "daemon.json 检测跳过: $_"
     }
+}
+
+$ddSettingsPath = "$env:APPDATA\Docker\settings.json"
+if (Test-Path $ddSettingsPath) {
+    try {
+        $ddJson = Get-Content $ddSettingsPath -Raw -ErrorAction SilentlyContinue
+        if ($ddJson -match $mirrorPattern) {
+            Warn "检测到失效的 Docker 镜像源 (Docker Desktop settings)，正在修复..."
+            $ddObj = $ddJson | ConvertFrom-Json
+            $needSave = $false
+            if ($ddObj.PSObject.Properties["overriddenDockerEngineConfig"]) {
+                $engineCfg = $ddObj.overriddenDockerEngineConfig
+                if ($engineCfg -and $engineCfg.PSObject.Properties["registry-mirrors"]) {
+                    $engineCfg."registry-mirrors" = @()
+                    $needSave = $true
+                }
+            }
+            if ($ddObj.PSObject.Properties["DockerDesktopDaemonConfig"]) {
+                $daemonCfg = $ddObj.DockerDesktopDaemonConfig
+                if ($daemonCfg -and "$daemonCfg" -match $mirrorPattern) {
+                    $cleanCfg = $daemonCfg -replace '"registry-mirrors"\s*:\s*\[[^\]]*\]', '"registry-mirrors": []'
+                    $ddObj.DockerDesktopDaemonConfig = $cleanCfg
+                    $needSave = $true
+                }
+            }
+            if ($needSave) {
+                $ddObj | ConvertTo-Json -Depth 10 | Set-Content $ddSettingsPath -Encoding UTF8
+                $mirrorFixed = $true
+                Ok "Docker Desktop settings 镜像源已清除"
+            }
+        }
+    } catch {
+        Warn "Docker Desktop settings 检测跳过: $_"
+    }
+}
+
+if ($mirrorFixed) {
+    Log "镜像源已修复，正在重启 Docker Desktop..."
+    $dockerExe = Get-ChildItem "C:\Program Files\Docker\Docker\Docker Desktop.exe" -ErrorAction SilentlyContinue
+    if ($dockerExe) {
+        Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        Start-Process $dockerExe.FullName
+        Log "等待 Docker Desktop 重启 (最多 60 秒)..."
+        $waited = 0
+        while ($waited -lt 60) {
+            Start-Sleep -Seconds 5
+            $waited += 5
+            try {
+                docker info 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { break }
+            } catch {}
+            Write-Host "  等待中... ($waited 秒)" -ForegroundColor DarkGray
+        }
+    } else {
+        Start-Sleep -Seconds 5
+    }
+    Ok "Docker 镜像源修复完成（已切换为官方源）"
 }
 
 # ── 构建并启动 ──

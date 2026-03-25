@@ -24,6 +24,13 @@ function Warn($msg) { Write-Host "[!!] $msg" -ForegroundColor Yellow }
 function Err($msg)  { Write-Host "[ERR] $msg" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
 
 $RepoUrl = "https://github.com/LDPrompt/lingque.git"
+$RepoMirrors = @(
+    "https://ghproxy.net/https://github.com/LDPrompt/lingque.git",
+    "https://mirror.ghproxy.com/https://github.com/LDPrompt/lingque.git",
+    "https://gh-proxy.com/https://github.com/LDPrompt/lingque.git"
+)
+$ZipUrl = "https://cdn.jsdelivr.net/gh/LDPrompt/lingque@main/"
+$ZipGitHub = "https://github.com/LDPrompt/lingque/archive/refs/heads/main.zip"
 $InstallDir = if ($env:LINGQUE_INSTALL_DIR) { $env:LINGQUE_INSTALL_DIR } else { "$env:USERPROFILE\lingque" }
 $TempDir = "$env:TEMP\lingque_setup"
 
@@ -345,8 +352,70 @@ if (Test-Path $InstallDir) {
     Remove-Item $InstallDir -Recurse -Force
 }
 
-git clone --depth 1 $RepoUrl $InstallDir
-if ($LASTEXITCODE -ne 0) { Err "下载失败，请检查网络连接后重试" }
+$cloneOk = $false
+
+git clone --depth 1 $RepoUrl $InstallDir 2>$null
+if ($LASTEXITCODE -eq 0) {
+    $cloneOk = $true
+} else {
+    Warn "GitHub 直连失败，尝试镜像加速..."
+    if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($mirror in $RepoMirrors) {
+        Log "尝试: $mirror"
+        git clone --depth 1 $mirror $InstallDir 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $cloneOk = $true
+            break
+        }
+        if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+if (-not $cloneOk) {
+    Warn "Git 克隆均失败，尝试下载 ZIP 包..."
+    Ensure-TempDir
+    $zipFile = "$TempDir\lingque.zip"
+    $downloaded = $false
+
+    foreach ($url in @($ZipGitHub)) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zipFile -UseBasicParsing -TimeoutSec 60
+            if (Test-Path $zipFile) {
+                $downloaded = $true
+                break
+            }
+        } catch {
+            Warn "下载失败: $url"
+        }
+    }
+
+    if ($downloaded) {
+        Log "正在解压..."
+        Expand-Archive -Path $zipFile -DestinationPath $TempDir -Force
+        $extracted = Get-ChildItem "$TempDir\lingque-*" -Directory | Select-Object -First 1
+        if ($extracted) {
+            if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
+            Move-Item $extracted.FullName $InstallDir
+            Ok "ZIP 下载解压完成"
+            $cloneOk = $true
+        }
+    }
+}
+
+if (-not $cloneOk) {
+    Write-Host ""
+    Write-Host "  所有下载方式均失败，请尝试以下方法:" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  方法1: 开启 VPN/代理后重新运行本脚本" -ForegroundColor Cyan
+    Write-Host "  方法2: 手动下载:" -ForegroundColor Cyan
+    Write-Host "    1. 浏览器打开 https://github.com/LDPrompt/lingque" -ForegroundColor White
+    Write-Host "    2. 点击绿色 Code 按钮 → Download ZIP" -ForegroundColor White
+    Write-Host "    3. 解压到 $InstallDir" -ForegroundColor White
+    Write-Host "    4. 在该目录下打开 PowerShell 运行 .\scripts\install-source.ps1" -ForegroundColor White
+    Write-Host ""
+    Read-Host "按回车退出"
+    exit 1
+}
 Ok "下载完成"
 
 Set-Location $InstallDir
