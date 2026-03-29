@@ -18,80 +18,103 @@ _BROWSER_KEYWORDS = re.compile(
 )
 
 _BROWSER_GUIDE_FULL = """\
-## 浏览器自动化指南
-浏览器使用真实 Chrome/Edge（CDP 模式），能正常访问淘宝、闲鱼等有反爬检测的网站。
+## 浏览器自动化
 
-### 核心流程
-1. **打开页面**: `browser_open(url)` → 自动加载 Cookie，返回元素快照（[e1] [e2]...编号）
-2. **操作元素**: `browser_click("e3")` 点击、`browser_type("e5", "内容")` 输入
-3. **刷新快照**: 页面变化后 `browser_snapshot` 重新扫描（操作失败时系统会自动重试）
-4. **保存登录**: `browser_save_cookies` 保存，下次访问自动登录
+浏览器使用真实 Chrome/Edge（CDP 模式），天然携带登录态，能正常访问淘宝、闲鱼等有反爬检测的网站。
 
-### 重要规则
-- **元素编号会过期**: 导航/内容变化后旧编号失效（系统会自动重新扫描重试一次）
-- **先看后操作**: 先看快照有哪些元素，再决定操作哪个
-- **下拉框直接用 browser_select**: 看到 combobox/select 元素直接调用，不要用 click、execute_js 或 analyze_page 绕路
-- **表单用 fill_form**: 多个输入框一次填完效率更高，自动识别下拉框
-- **等待加载**: 用 `browser_wait` 等待特定元素或文字出现
-- **多标签页**: `browser_tab_new` 开新标签，`browser_tabs` 查看所有
+### 浏览哲学：像人一样思考
 
-### 操作工具选择
-- **点击**: `browser_click("e3")` — 按钮、链接、标签页
-- **输入**: `browser_type("e5", "内容")` — 输入框、搜索框
-- **下拉框**: `browser_select("e4", value="选项文本")` — ⚠️ **下拉框/select/combobox 必须用这个**，自动展开+滚动查找+选中
-- **容器内滚动**: `browser_scroll_element("e6", direction="down")` — 在可滚动区域（下拉面板、列表）内滚动
-- **悬停**: `browser_hover("e2")` — 触发悬停菜单、tooltip
-- **拖拽/滑块**: `browser_drag("e5", x_offset=280)` — 滑块验证码、拖放操作，自动模拟人类轨迹
-- **键盘**: `browser_press_key("Escape")` — 关闭弹窗；`ArrowDown/ArrowUp` 在下拉框中选择
-- **表单**: `browser_fill_form(fields=[...])` — 一次填完多个字段
+执行浏览器任务时，带着目标进入，边看边判断，遇到阻碍就解决——全程围绕「我要达成什么」做决策。
 
-### 定位方式（4种）
+**① 明确目标** — 用户要做什么？什么算完成？需要获取什么信息、达到什么结果？这是所有后续判断的锚点。
+
+**② 选择起点** — 根据任务性质和平台特征，选一个最可能直达的方式作为第一步：
+- 已知无反爬的简单页面 → 直接 browser_open(url)
+- 需要搜索/表单/登录/反爬平台 → 打开首页，用 GUI 方式操作（输入搜索框 → 点按钮）
+- 不确定 → 先打开首页看看，根据快照判断下一步
+
+**③ 过程校验** — 每一步的结果都是证据。用结果对照目标判断：路径在推进吗？
+- 操作后先看快照确认效果，再决定下一步
+- 发现方向错了立即调整，不在同一个方式上反复重试
+- 遇到弹窗/登录墙：挡住目标就处理，没挡住就绕过（内容可能已在 DOM 中）
+
+**④ 完成判断** — 对照目标确认完成才停止，但也不要过度操作。
+
+### 程序化 vs GUI 交互（关键选择）
+
+浏览器操作有两种方式，根据场景选择：
+
+| 方式 | 特点 | 适用场景 |
+|------|------|---------|
+| **程序化**（构造 URL 导航、JS 操控 DOM） | 快速直达，但容易触发反爬 | 已知无反爬的直达 URL、API 数据提取 |
+| **GUI 交互**（打开首页 → 输入搜索框 → 点按钮） | 像人一样操作，确定性最高 | 搜索、登录、表单、反爬平台、不确定时 |
+
+**核心原则**：
+- **搜索类任务用 GUI**：打开搜索引擎/平台首页 → 找到搜索框(browser_type) → 点搜索按钮(browser_click)，而不是构造搜索 URL
+- **反爬平台必须 GUI**：淘宝、闲鱼、小红书、抖音等平台，构造 URL 极易触发风控
+- **程序化受阻时回退 GUI**：页面报错、验证码、空结果 → 换成 GUI 方式重试
+- **站点自身链接可信**：DOM 中的 href 天然携带完整参数，手动构造的 URL 可能缺失隐式参数导致被拦
+
+### 操作工具速查
+
+| 操作 | 工具 | 说明 |
+|------|------|------|
+| 点击 | `browser_click("e3")` | 按钮、链接、标签页 |
+| 输入 | `browser_type("e5", "内容")` | 输入框、搜索框 |
+| 下拉框 | `browser_select("e4", value="选项")` | **必须用这个**，不要 click |
+| 容器滚动 | `browser_scroll_element("e6", "down")` | 下拉面板、可滚动列表 |
+| 悬停 | `browser_hover("e2")` | 触发悬停菜单 |
+| 拖拽/滑块 | `browser_drag("e5", x_offset=280)` | 滑块验证码，模拟人类轨迹 |
+| 键盘 | `browser_press_key("Escape")` | 关闭弹窗 |
+| 表单 | `browser_fill_form(fields=[...])` | 多字段一次填完 |
+| 刷新快照 | `browser_snapshot` | 页面变化后必须重新扫描 |
+| 保存登录 | `browser_save_cookies` | 下次自动登录 |
+| 多标签页 | `browser_tab_new` / `browser_tabs` | 并行打开多个页面 |
+
+### 定位方式
 - **元素编号**: e1, e2... → 来自快照，最常用
 - **CSS 选择器**: .class, #id, div[attr] → 精确定位
 - **XPath**: //div[@class="item"] → 复杂结构
 - **文字匹配**: 直接传 "登录"、"下一页" → 最简单
 
-### 典型场景
-- **搜索**: open → type(搜索框, 关键词, press_enter=true) → 看结果
-- **登录**: open → fill_form([用户名, 密码], submit_ref=登录按钮) → save_cookies
-- **弹窗登录**: 快照会标注弹窗内元素并优先显示，直接操作弹窗内的编号即可
-- **下拉框**: browser_select("e4", value="北京") — 自动展开、滚动查找、选中（不要用 browser_click 操作下拉框！）
-- **滑块验证码**: `browser_solve_slider()` — 自动搜索并完成滑块验证（不需要元素编号，支持 iframe）
-- **关闭弹窗**: browser_press_key("Escape") — 关闭弹窗/遮罩
-- **抓数据**: 见下方数据抓取指南
+### 典型场景（GUI 优先）
+
+**搜索**（正确方式）：
+1. `browser_open("https://www.baidu.com")` — 打开首页
+2. 看快照找到搜索框 → `browser_type("e3", "关键词", press_enter=true)`
+3. 看结果快照 → 点击目标链接
+
+**登录**：open 首页 → fill_form([用户名, 密码], submit_ref=登录按钮) → save_cookies
+
+**弹窗登录**：快照会标注弹窗内元素并优先显示，直接操作弹窗内编号
+
+**滑块验证码**：`browser_solve_slider()` — 自动搜索并完成
+
+**下拉框**：`browser_select("e4", value="北京")` — 不要用 click 操作下拉框
 
 ### 数据抓取指南
-1. **API 数据抓取**（最优，电商首选）:
-   - browser_network_start(url_filter="api") → 操作页面(搜索/翻页/滚动) → browser_network_get(content_type="json")
-   - 淘宝: url_filter="mtop" | 闲鱼: url_filter="mtop.idle" | 京东: url_filter="api.m.jd" | 抖音: url_filter="api"
-2. **自动翻页采集**（多页数据一句话搞定，强烈推荐）:
-   - `browser_collect_pages(item_selector="li[data-sku]", fields={"title":".p-name","price":".p-price"}, max_pages=5)`
-   - 自动提取当前页 → 点击"下一页" → 重复，直到采完所有页或达到上限
-   - 下一页按钮自动检测（下一页/Next/»），也可手动指定 next_button
-   - 自动去重 + 容错（连续2页无新数据自动停止）
-3. **智能相似元素采集**（单页深度提取）:
-   - `browser_analyze_structure` → 识别页面列表/表单/表格区域
-   - `browser_find_similar(selector=".product:first-child")` → 自动找到所有同类商品卡片并提取数据
-   - `browser_extract_list(container="#list", item_selector=".item", fields={"title":".name","price":".price","img":"img"})` → 精准字段级提取
-4. **滚动采集**（无限滚动/懒加载）:
-   - browser_scroll_collect(selector=".item-card", sub_selectors={"title":".title","price":".price"}, scroll_times=5)
-5. **HTML 提取**（通用）:
-   - browser_extract(selector=".goods-item") / browser_extract_table() / browser_extract_links()
-6. **操作策略**: 先用网络监听看有没有 API JSON → 有就用 → 多页数据直接 collect_pages 一句话采完 → 单页深度用 find_similar/extract_list → 无限滚动用 scroll_collect
+1. **API 数据抓取**（电商首选）: network_start → 操作页面 → network_get(content_type="json")
+2. **自动翻页**: `browser_collect_pages(item_selector, fields, max_pages=5)` — 多页数据一句话搞定
+3. **相似元素**: `browser_find_similar(selector)` → 自动找同类元素提取数据
+4. **滚动采集**: `browser_scroll_collect(selector, sub_selectors, scroll_times=5)`
+5. **HTML 提取**: `browser_extract(selector)` / `browser_extract_table()` / `browser_extract_links()`
+6. **策略**: API 监听 → 翻页采集 → 相似元素 → 滚动采集 → HTML 提取
 
 ### 元素操作稳定性
-- 页面变化后元素编号失效时，系统会自动三层恢复：选择器直接命中 → 语义模糊匹配 → 位置匹配
-- DOM 发生变化时扩展会主动通知，操作前自动刷新快照
-- 操作失败不要直接重试，先 browser_snapshot 看最新状态
+- 元素编号会过期，但系统自动三层恢复：选择器直接命中 → 语义模糊匹配 → 位置匹配
+- DOM 变化时扩展主动通知，操作前自动刷新快照
+- 操作失败不要直接重试，先 browser_snapshot 看最新状态再决策
 
-### 电商平台常用选择器参考
-- **淘宝**: 商品卡片 `[data-spm] a`, 标题 `.title`, 价格 `.price`, 翻页 `.next`
-- **闲鱼**: 商品卡片 `.item-card`, `.feed-item`, 标题 `.title`, 价格 `.price`
-- **京东**: 列表 `#J_goodsList li[data-sku]`, 标题 `.p-name`, 价格 `.p-price`, 翻页 `.pn-next`
-- **抖音**: 视频/商品卡片 `[data-e2e]`, 用户信息 `.author-card`
-- **通用**: 先 `browser_analyze_structure` 自动识别 → 多页就 `browser_collect_pages` → 单页就 `browser_find_similar`"""
+### 电商平台选择器参考
+- **淘宝**: `[data-spm] a`, `.title`, `.price`, `.next`
+- **闲鱼**: `.item-card`, `.feed-item`, `.title`, `.price`
+- **京东**: `#J_goodsList li[data-sku]`, `.p-name`, `.p-price`, `.pn-next`
+- **抖音**: `[data-e2e]`, `.author-card`
+- **通用**: `browser_analyze_structure` 自动识别 → 多页 `collect_pages` → 单页 `find_similar`
 
-_BROWSER_GUIDE_SHORT = "浏览器自动化可用（browser_open 等技能），需要操作网页时可直接使用。"
+{site_experience_section}"""
+
+_BROWSER_GUIDE_SHORT = "浏览器自动化可用（browser_open 等技能），需要操作网页时可直接使用。搜索类任务优先 GUI 交互（打开首页 → 搜索框输入 → 点按钮），而不是构造搜索 URL。"
 
 
 _SKILL_CATEGORY_MAP = {
@@ -311,6 +334,22 @@ class ContextBuilder:
         return ""
 
     @staticmethod
+    def _load_site_experience_summary() -> str:
+        """加载已有的站点经验域名列表"""
+        try:
+            from ..browser.site_experience import list_experiences, load_experience
+            domains = list_experiences()
+            if not domains:
+                return ""
+            lines = ["### 站点经验（已积累）"]
+            lines.append(f"已有 {len(domains)} 个站点的操作经验: {', '.join(domains[:15])}")
+            lines.append("浏览器操作前如果目标在上述列表中，系统会自动加载该站点的经验（平台特征、有效模式、已知陷阱）。")
+            lines.append("操作中发现了新站点经验时，可用 `browser_save_site_experience` 保存。")
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
+    @staticmethod
     def _build_knowledge_context(user_message: str) -> str:
         if not user_message:
             return ""
@@ -369,7 +408,8 @@ class ContextBuilder:
             recalled_memories = recalled_memories[:self.MAX_RECALL_CHARS] + "\n... [召回过长已截断]"
 
         if self._should_inject_browser_guide(user_message, recent_messages):
-            browser_guide = _BROWSER_GUIDE_FULL
+            site_exp = self._load_site_experience_summary()
+            browser_guide = _BROWSER_GUIDE_FULL.format(site_experience_section=site_exp)
         else:
             browser_guide = _BROWSER_GUIDE_SHORT
 

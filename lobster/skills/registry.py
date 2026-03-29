@@ -38,6 +38,7 @@ class SkillResult:
     success: bool
     data: str = ""
     error: str = ""
+    images: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         if self.success:

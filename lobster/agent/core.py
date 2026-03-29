@@ -833,12 +833,13 @@ class Agent:
                 ))
 
             # 情况 B: LLM 请求调用工具
-            tool_results = []
+            from ..skills.registry import SkillResult as _SR
+            tool_results: list[tuple[ToolCall, _SR]] = []
             total_tools = len(response.tool_calls)
             
             for idx, tool_call in enumerate(response.tool_calls, 1):
                 if self._rs().user_cancelled:
-                    tool_results.append((tool_call, "[用户已取消] 操作被跳过"))
+                    tool_results.append((tool_call, _SR(success=False, error="[用户已取消] 操作被跳过")))
                     continue
 
                 self._track_tool_call(tool_call)
@@ -849,27 +850,33 @@ class Agent:
                 _t0 = time.monotonic()
                 _tool_ok = True
                 try:
-                    result = await asyncio.wait_for(
+                    raw_result = await asyncio.wait_for(
                         self._execute_tool(tool_call),
                         timeout=tool_timeout,
                     )
                 except asyncio.TimeoutError:
                     _tool_ok = False
                     logger.error(f"工具 {tool_call.name} 执行超时 ({tool_timeout}s)")
-                    result = f"工具执行超时 ({tool_timeout}s): {tool_call.name}"
+                    raw_result = _SR(success=False, error=f"工具执行超时 ({tool_timeout}s): {tool_call.name}")
                     auto_log_error(tool_call.name, f"超时 {tool_timeout}s",
                                    str(tool_call.arguments)[:100])
                 except Exception as e:
                     _tool_ok = False
                     logger.error(f"工具 {tool_call.name} 执行异常: {e}", exc_info=True)
-                    result = f"工具执行异常: {e}"
+                    raw_result = _SR(success=False, error=f"工具执行异常: {e}")
                     auto_log_error(tool_call.name, str(e)[:300],
                                    str(tool_call.arguments)[:100])
                 _elapsed_ms = int((time.monotonic() - _t0) * 1000)
 
+                result = str(raw_result)
                 result = self._enrich_error_result(tool_call.name, result)
                 self._track_tool_result(tool_call.name, result)
-                tool_results.append((tool_call, result))
+                raw_result_with_text = _SR(
+                    success=raw_result.success, data=result if raw_result.success else raw_result.data,
+                    error=result if not raw_result.success else raw_result.error,
+                    images=raw_result.images,
+                )
+                tool_results.append((tool_call, raw_result_with_text))
 
                 # === 自我进化: 工具统计 + 错误修复配对 ===
                 le = _get_learning_engine()
@@ -906,16 +913,29 @@ class Agent:
                     reasoning_content=response.reasoning_content,
                 )
             )
-            for tool_call, result in tool_results:
-                content = result
+            for tool_call, sr in tool_results:
+                content = str(sr)
                 if self._max_tool_result_chars > 0 and len(content) > self._max_tool_result_chars:
-                    content = content[:self._max_tool_result_chars] + f"\n... [结果已截断，原始 {len(result)} 字符]"
+                    content = content[:self._max_tool_result_chars] + f"\n... [结果已截断，原始 {len(content)} 字符]"
                 self.memory.add_message(
                     Message(
                         role="tool",
                         content=content,
                         name=tool_call.name,
                         tool_call_id=tool_call.id,
+                    )
+                )
+
+            _all_tool_images = []
+            for _, sr in tool_results:
+                if sr.images:
+                    _all_tool_images.extend(sr.images)
+            if _all_tool_images:
+                self.memory.add_message(
+                    Message(
+                        role="user",
+                        content="[SoM 页面视觉标注 - 元素编号已标记在截图上，配合文本快照定位元素]",
+                        images=_all_tool_images[:2],
                     )
                 )
 
@@ -1121,11 +1141,12 @@ class Agent:
             return self._agent_config.get_tool_timeout(tool_name)
         return self._tool_timeout
 
-    async def _execute_tool(self, tool_call: ToolCall) -> str:
-        """执行单个工具调用，含安全检查"""
+    async def _execute_tool(self, tool_call: ToolCall) -> "SkillResult":
+        """执行单个工具调用，含安全检查。返回 SkillResult 以保留 images 等结构化信息。"""
+        from ..skills.registry import SkillResult as _SR
         skill = skill_registry.get(tool_call.name)
         if not skill:
-            return f"未知工具: {tool_call.name}"
+            return _SR(success=False, error=f"未知工具: {tool_call.name}")
 
         need_confirmation = (
             self.require_confirmation
@@ -1140,9 +1161,9 @@ class Agent:
             if not confirmed:
                 self._rs().user_cancelled = True
                 logger.info(f"用户取消操作，Agent 将停止: {tool_call.name}")
-                return f"[用户已取消] 操作被用户拒绝: {tool_call.name}"
+                return _SR(success=False, error=f"[用户已取消] 操作被用户拒绝: {tool_call.name}")
 
-        return await skill_registry.execute(tool_call.name, tool_call.arguments)
+        return await skill_registry.execute_raw(tool_call.name, tool_call.arguments)
 
     _DESTRUCTIVE_KEYWORDS = re.compile(
         r'\b(rm|rmdir|del|unlink|shred|truncate)\b'

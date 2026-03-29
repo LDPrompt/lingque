@@ -132,6 +132,17 @@ _BUILTIN_MCP_REGISTRY: list[MCPServerInfo] = [
         source="pip",
         install_cmd="pip install mcp-server-time",
     ),
+    MCPServerInfo(
+        id="bb-browser",
+        name="bb-browser",
+        description="用你的真实浏览器操作 36 个平台（知乎、微博、B站、推特、GitHub 等），天然携带登录态",
+        command="npx",
+        args=["-y", "bb-browser", "--mcp"],
+        category="web",
+        source="npm",
+        install_cmd="npm install -g bb-browser",
+        homepage="https://github.com/epiral/bb-browser",
+    ),
 ]
 
 

@@ -29,7 +29,7 @@ croniter>=3.0.0       # P2: 定时任务
 # ==================== P3: 记忆增强 ====================
 # 向量数据库（语义搜索）
 chromadb>=0.5.0
-pysqlite3-binary>=0.5.0  # 系统 sqlite3 < 3.35.0 时自动替换
+pysqlite3-binary>=0.5.0; sys_platform == "linux"  # Linux only, 系统 sqlite3 < 3.35.0 时自动替换
 numpy<2.0
 
 # 向量嵌入模型（多语言支持）

@@ -206,6 +206,114 @@
     return text || ariaLabel || alt;
   }
 
+  // ───────────────────── context & state detection ─────────────────────
+
+  function _detectContext(el) {
+    let cur = el.parentElement;
+    let depth = 0;
+    const parts = [];
+    while (cur && depth < 6) {
+      const tag = cur.tagName.toLowerCase();
+      if (tag === "form") {
+        const formName = cur.getAttribute("name") || cur.getAttribute("aria-label")
+          || cur.id || cur.getAttribute("data-testid") || "";
+        parts.unshift(formName ? formName + "表单" : "表单");
+        break;
+      }
+      if (tag === "dialog" || cur.getAttribute("role") === "dialog") {
+        const title = cur.querySelector("h1,h2,h3,[class*='title'],[class*='header']");
+        parts.unshift(title ? _trim(title.innerText, 20) + "弹窗" : "弹窗");
+        break;
+      }
+      if (tag === "nav" || cur.getAttribute("role") === "navigation") {
+        const label = cur.getAttribute("aria-label") || "";
+        parts.unshift(label ? label + "导航" : "导航栏");
+        break;
+      }
+      if (tag === "section" || tag === "fieldset" || cur.getAttribute("role") === "group") {
+        const heading = cur.querySelector("h1,h2,h3,h4,legend,[class*='title'],[class*='header']");
+        if (heading) {
+          parts.unshift(_trim(heading.innerText, 20));
+          break;
+        }
+      }
+      if (tag === "header" || tag === "footer" || tag === "aside" || tag === "main") {
+        parts.unshift(tag);
+        break;
+      }
+      cur = cur.parentElement;
+      depth++;
+    }
+    return parts.join(" > ") || "";
+  }
+
+  function _detectNeighbors(el) {
+    const parent = el.parentElement;
+    if (!parent) return "";
+    const siblings = Array.from(parent.children).filter(function(c) {
+      return _isVisible(c) && c !== el;
+    });
+    const idx = Array.from(parent.children).indexOf(el);
+    const hints = [];
+    for (let i = idx - 1; i >= 0 && hints.length < 1; i--) {
+      const sib = parent.children[i];
+      if (!sib || !_isVisible(sib)) continue;
+      const tag = sib.tagName.toLowerCase();
+      if (tag === "label" || _isInteractive(sib)) {
+        hints.push("前:" + _trim(sib.innerText || sib.textContent, 15));
+      }
+    }
+    for (let i = idx + 1; i < parent.children.length && hints.length < 2; i++) {
+      const sib = parent.children[i];
+      if (!sib || !_isVisible(sib)) continue;
+      const tag = sib.tagName.toLowerCase();
+      if (tag === "label" || _isInteractive(sib)) {
+        hints.push("后:" + _trim(sib.innerText || sib.textContent, 15));
+      }
+    }
+    return hints.join(", ");
+  }
+
+  function _detectState(el) {
+    const states = [];
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") {
+      states.push("disabled");
+    }
+    if (el.required || el.getAttribute("aria-required") === "true") {
+      states.push("required");
+    }
+    if (el.checked || el.getAttribute("aria-checked") === "true") {
+      states.push("checked");
+    }
+    if (el.getAttribute("aria-expanded") === "true") {
+      states.push("expanded");
+    } else if (el.getAttribute("aria-expanded") === "false") {
+      states.push("collapsed");
+    }
+    if (el.getAttribute("aria-selected") === "true") {
+      states.push("selected");
+    }
+    if (el.readOnly || el.getAttribute("aria-readonly") === "true") {
+      states.push("readonly");
+    }
+    var tag = el.tagName.toLowerCase();
+    if ((tag === "input" || tag === "textarea") && !el.value) {
+      states.push("empty");
+    } else if ((tag === "input" || tag === "textarea") && el.value) {
+      states.push("filled");
+    }
+    return states.join(",");
+  }
+
+  function _detectAriaDescription(el) {
+    var describedBy = el.getAttribute("aria-describedby");
+    if (describedBy) {
+      var descEl = document.getElementById(describedBy);
+      if (descEl) return _trim(descEl.innerText || descEl.textContent, 50);
+    }
+    return el.getAttribute("aria-description") || "";
+  }
+
   // ───────────────────── dialog detection ─────────────────────
 
   const _DIALOG_SELECTORS = [
@@ -289,6 +397,10 @@
         checked: el.checked || false,
         value: _trim(el.value, 30),
         required: el.required || false,
+        context: _detectContext(el),
+        neighbors: _detectNeighbors(el),
+        state: _detectState(el),
+        ariaDescription: _detectAriaDescription(el),
       });
     }
 
@@ -321,13 +433,18 @@
           const key = "button|" + lbl;
           if (seen.has(key)) continue;
           seen.add(key);
+          var fbSels = _getSelectors(el);
           results.push({
             role: "button", name: lbl.slice(0, MAX_TEXT), tag: el.tagName.toLowerCase(),
-            bbox: _bbox(el), selectors: _getSelectors(el),
-            stability: _selectorStability(_getSelectors(el)),
+            bbox: _bbox(el), selectors: fbSels,
+            stability: _selectorStability(fbSels),
             visible: true, interactive: true,
             in_dialog: false, in_shadow: false,
             disabled: false, checked: false, value: "", required: false,
+            context: _detectContext(el),
+            neighbors: _detectNeighbors(el),
+            state: "",
+            ariaDescription: "",
           });
         } catch (_) {}
       }
@@ -721,7 +838,7 @@
   // ───────────────────── expose API ─────────────────────
 
   window.__lingque = {
-    version: "1.1.0",
+    version: "1.2.0",
     scanElements: scanElements,
     findSimilar: findSimilar,
     getSelectors: getSelectors,

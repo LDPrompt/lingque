@@ -18,9 +18,11 @@
 
 ---
 
-## 方式一：源码安装（推荐新手）
+## 方式一：源码安装（推荐）
 
-适合没装过 Docker 的用户。脚本会 **全自动** 帮你安装 Python、Git，不需要你额外下载任何东西。
+适合绝大多数用户。脚本会 **全自动** 帮你安装 Python、Git，不需要你额外下载任何东西。
+
+> 💡 源码安装非常安全，所有文件只在安装目录内，不会动你电脑上的其他文件。想删掉直接删文件夹就行。
 
 ### 第 1 步：打开 PowerShell（管理员）
 
@@ -31,9 +33,19 @@
 
 > 💡 也可以直接 **右键桌面左下角的开始按钮**（Windows 图标）→ 选「Windows PowerShell (管理员)」
 
-### 第 2 步：粘贴命令
+### 第 2 步：（可选）指定安装目录
 
-在打开的蓝色窗口里，**复制** 下面这一整行（很长，一定要完整复制），然后在窗口里 **右键粘贴**，按 **回车**：
+默认安装到 `C:\Users\你的用户名\lingque`。如果 C 盘空间不足或想装到其他盘，先执行：
+
+```
+$env:LINGQUE_INSTALL_DIR = "D:\lingque"
+```
+
+把 `D:\lingque` 换成你想装的路径。不需要改就跳过这步。
+
+### 第 3 步：粘贴安装命令
+
+在 PowerShell 窗口里，**复制** 下面这一整行（很长，一定要完整复制），然后在窗口里 **右键粘贴**，按 **回车**：
 
 ```
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $f="$env:TEMP\dl.ps1"; $ok=$false; foreach($h in @("cdn.jsdmirror.com","gcore.jsdelivr.net","cdn.jsdelivr.net")){ if(-not $ok){ try{ (New-Object Net.WebClient).DownloadFile("https://$h/gh/LDPrompt/lingque@main/scripts/install-source.ps1",$f); $ok=$true }catch{} } }; if(-not $ok){ Write-Host "[ERR] All CDN failed" -ForegroundColor Red; pause; exit 1 }; [IO.File]::ReadAllText($f,[Text.Encoding]::UTF8)|Set-Content "$env:TEMP\lingque-install.ps1" -Encoding UTF8; powershell -ExecutionPolicy Bypass -File "$env:TEMP\lingque-install.ps1"
@@ -49,7 +61,7 @@
 
 1. 用浏览器打开 https://github.com/LDPrompt/lingque
 2. 点绿色 **Code** 按钮 → **Download ZIP**
-3. 把下载的 ZIP 解压到 `C:\Users\你的用户名\lingque` 目录
+3. 把下载的 ZIP 解压到你想安装的目录（比如 `D:\lingque`）
 4. 在该目录下右键空白处 → **在终端中打开** 或 **在此处打开 PowerShell**
 5. 运行：
 
@@ -65,7 +77,33 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-source.ps1
 Set-ExecutionPolicy Bypass -Scope Process
 ```
 
-### 第 3 步：跟着提示操作
+**情况 3：提示 "未找到 Python 3.11+" 但你电脑已有 Python 3.12**
+
+这是因为 `python` 命令指向了旧版本。先停掉脚本（Ctrl+C），然后手动操作：
+
+```powershell
+cd D:\lingque
+py -3.12 -m venv venv
+Set-ExecutionPolicy Bypass -Scope Process
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+```
+
+**情况 4：pip 安装报错 "Could not find a version that satisfies the requirement"**
+
+可能是 pip 源太旧，换清华源重试：
+
+```powershell
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+```
+
+如果还不行就用官方源：
+
+```powershell
+pip install -r requirements.txt -i https://pypi.org/simple/
+```
+
+### 第 4 步：跟着提示操作
 
 脚本会自动检测环境、安装依赖。中途会问你几个问题，按下表操作：
 
@@ -78,9 +116,20 @@ Set-ExecutionPolicy Bypass -Scope Process
 
 等脚本跑完，看到 **「🎉 灵雀安装完成!」** 就说明成功了。
 
-### 第 4 步：启动灵雀
+### 第 5 步：启动灵雀
 
 安装完成后，桌面上会出现一个 **「启动灵雀」** 的快捷方式，**双击** 就能运行。
+
+也可以手动启动：
+
+```powershell
+cd D:\lingque  # 换成你的安装目录
+Set-ExecutionPolicy Bypass -Scope Process   # 每次新开窗口都要执行这一行
+.\venv\Scripts\Activate.ps1
+python -m lobster.main
+```
+
+> ⚠️ 如果提示 **"禁止运行脚本"**，说明当前 PowerShell 窗口没有执行权限。每次新开 PowerShell 窗口，都要先执行 `Set-ExecutionPolicy Bypass -Scope Process` 再激活虚拟环境。嫌麻烦可以一劳永逸：以管理员身份运行 PowerShell，执行 `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`，以后就不用每次都打了。
 
 看到下面这个画面就说明成功了：
 
@@ -98,11 +147,31 @@ Set-ExecutionPolicy Bypass -Scope Process
 
 现在可以直接打字和灵雀对话了！试试输入「你好」。
 
+### 第 6 步：（可选）启用浏览器控制
+
+灵雀可以控制你本地的 Chrome 浏览器帮你操作网页。安装浏览器驱动：
+
+```powershell
+playwright install chromium
+```
+
+如果想看到灵雀操作浏览器的过程，编辑 `.env` 文件，加一行：
+
+```
+BROWSER_HEADLESS=false
+```
+
+重启灵雀后，灵雀操作浏览器时你就能看到 Chrome 窗口在动了。
+
 ---
 
-## 方式二：Docker 安装（推荐有一定基础的用户）
+## 方式二：Docker 安装
 
-Docker 是一种容器技术，好处是环境隔离、干净不污染系统。脚本会自动帮你安装 Docker Desktop 和 Git。
+Docker 是一种容器技术，好处是环境隔离、干净不污染系统。
+
+> ⚠️ **Docker Desktop 要求 Windows 10 22H2 (Build 19045) 或更高版本。** 如果你的 Windows 版本较旧，请使用方式一（源码安装）。
+>
+> 查看 Windows 版本：按 `Win + R`，输入 `winver`，看到 Build 号。低于 19045 就只能用源码安装。
 
 ### 第 1 步：打开 PowerShell（管理员）
 
@@ -159,13 +228,13 @@ docker compose logs -f
 
 ### 修改配置
 
-配置文件在安装目录的 `.env` 文件里。打开方式：
+配置文件在安装目录的 `.env` 文件里。
 
 ```powershell
-notepad C:\Users\你的用户名\lingque\.env
+notepad D:\lingque\.env
 ```
 
-或者用文件管理器找到 `C:\Users\你的用户名\lingque` 文件夹，右键 `.env` → 用记事本打开。
+> ⚠️ 用记事本打开 `.env` 时可能弹出编码提示，点「确定」即可。保存时选择 **文件 → 另存为 → 编码选 UTF-8**，避免编码问题。
 
 ### 升级到最新版
 
@@ -176,7 +245,7 @@ notepad C:\Users\你的用户名\lingque\.env
 **方法 2：手动执行升级脚本**
 
 ```powershell
-cd ~\lingque
+cd D:\lingque
 .\scripts\upgrade.ps1
 ```
 
@@ -185,8 +254,16 @@ cd ~\lingque
 ### 停止 / 重启
 
 **源码版：**
-- 关闭「启动灵雀」窗口 = 停止
+- 在运行窗口按 `Ctrl+C` = 停止
 - 双击桌面快捷方式 = 重新启动
+- 或手动：
+
+```powershell
+cd D:\lingque
+Set-ExecutionPolicy Bypass -Scope Process
+.\venv\Scripts\Activate.ps1
+python -m lobster.main
+```
 
 **Docker 版：**
 
@@ -251,32 +328,68 @@ FEISHU_MODE=websocket
 
 ## 常见问题
 
+### Q: C 盘空间不够怎么办？
+
+灵雀全部装完大约占 2-3GB。可以在安装前指定其他盘：
+
+```powershell
+$env:LINGQUE_INSTALL_DIR = "D:\lingque"
+```
+
+然后再运行安装命令即可。Python 本身会装在 C 盘（约 200MB），这个无法避免。
+
+### Q: 电脑里有多个 Python 版本，怎么确认用哪个？
+
+打开 PowerShell 执行：
+
+```powershell
+py -0
+```
+
+会列出所有已安装的 Python 版本。灵雀需要 **3.11 或以上**。如果默认版本不对，手动创建虚拟环境：
+
+```powershell
+py -3.12 -m venv venv
+```
+
+### Q: Docker Desktop 装不上，提示 "incompatible version of Windows"
+
+你的 Windows 版本低于 22H2 (Build 19045)，不支持最新 Docker Desktop。请用 **方式一源码安装**，效果完全一样。
+
 ### Q: GitHub 完全打不开 / 下载不了怎么办？
 
 国内部分网络无法直接访问 GitHub，可以尝试：
 
-1. **使用代理克隆**：打开 PowerShell，执行：
+1. **使用代理克隆**：
 
 ```powershell
-git clone --depth 1 https://ghproxy.net/https://github.com/LDPrompt/lingque.git $env:USERPROFILE\lingque
+git clone --depth 1 https://ghproxy.net/https://github.com/LDPrompt/lingque.git D:\lingque
 ```
 
 如果这条也不行，换一个：
 
 ```powershell
-git clone --depth 1 https://mirror.ghproxy.com/https://github.com/LDPrompt/lingque.git $env:USERPROFILE\lingque
+git clone --depth 1 https://mirror.ghproxy.com/https://github.com/LDPrompt/lingque.git D:\lingque
 ```
 
-克隆成功后运行：
-
-```powershell
-cd $env:USERPROFILE\lingque
-.\scripts\install-source.ps1
-```
-
-2. **浏览器下载 ZIP**：一般浏览器可以正常打开 GitHub 页面（即使终端不行），下载 ZIP 解压后按「手动安装」步骤操作。
+2. **浏览器下载 ZIP**：一般浏览器可以正常打开 GitHub 页面（即使终端不行），下载 ZIP 解压后按手动安装步骤操作。
 
 3. **用手机热点**：换个网络环境可能就通了。
+
+### Q: 每次启动都提示 "禁止运行脚本" / "Activate.ps1 无法加载"
+
+Windows 默认禁止运行 PowerShell 脚本。有两种解决办法：
+
+**方法 1（每次）：** 在当前窗口临时解锁
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process
+```
+
+**方法 2（一劳永逸）：** 以管理员身份打开 PowerShell，执行：
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+以后所有新窗口都不用再打这条命令了。
 
 ### Q: Python 安装后提示"无法识别"
 
@@ -295,7 +408,7 @@ Docker 镜像源配置失效了。按上面「Docker 构建报错怎么办」的
 不需要重新安装，直接在源码目录执行：
 
 ```powershell
-cd $env:USERPROFILE\lingque
+cd D:\lingque
 docker compose up -d --build
 ```
 
@@ -305,10 +418,14 @@ docker compose up -d --build
 
 **不会。** 你的记忆、配置（.env）、凭证、定时任务等所有数据都保存在独立目录中，升级只更新代码，不影响数据。
 
+### Q: 想看到灵雀操作浏览器的过程
+
+编辑 `.env`，加一行 `BROWSER_HEADLESS=false`，重启灵雀即可看到 Chrome 窗口。
+
 ### Q: 怎么卸载？
 
-1. 停止灵雀（关窗口或 `docker compose down`）
-2. 删除安装目录：`C:\Users\你的用户名\lingque`
+1. 停止灵雀（Ctrl+C 或 `docker compose down`）
+2. 删除安装目录（比如 `D:\lingque`）
 3. 删除桌面上的「启动灵雀」快捷方式
 4. （可选）卸载 Python / Docker Desktop
 

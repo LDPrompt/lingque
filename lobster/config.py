@@ -176,6 +176,10 @@ class BrowserConfig(BaseSettings):
     viewport: str = Field("1280,720", alias="BROWSER_VIEWPORT")
     # 下载目录
     downloads_dir: str = Field("./downloads", alias="BROWSER_DOWNLOADS_DIR")
+    # Set-of-Mark 视觉标注（截图上显示元素编号，需 LLM 支持 vision）
+    som_enabled: bool = Field(True, alias="BROWSER_SOM_ENABLED")
+    # 多策略自愈定位（元素定位失败时逐级降级重试）
+    selfheal_enabled: bool = Field(True, alias="BROWSER_SELFHEAL_ENABLED")
 
 
 class SecurityConfig(BaseSettings):

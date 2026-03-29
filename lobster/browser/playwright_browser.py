@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+import platform
 import random
 import re
 import shutil
@@ -172,6 +173,98 @@ def _ensure_playwright():
 
 
 # ==================== 系统 Chrome 检测 ====================
+
+def _is_port_in_use(port: int) -> bool:
+    """检测本地端口是否已被占用"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(2.0)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _is_browser_process_running() -> bool:
+    """检测系统上是否有 Chrome/Edge 进程正在运行"""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if "chrome.exe" in result.stdout.lower():
+                return True
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "msedge.exe" in result.stdout.lower()
+        else:
+            for proc_name in ("chrome", "chromium", "msedge"):
+                result = subprocess.run(
+                    ["pgrep", "-x", proc_name],
+                    capture_output=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    return True
+            return False
+    except Exception:
+        return False
+
+
+def _discover_devtools_port() -> tuple[int, str] | None:
+    """从 Chrome 的 DevToolsActivePort 文件发现调试端口和 WebSocket 路径。
+    chrome://inspect 开启远程调试时，Chrome 会在配置目录写入此文件。
+    返回 (port, ws_path) 或 None。
+    """
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        logger.debug(f"LOCALAPPDATA={local}")
+        if local:
+            candidates.append(os.path.join(local, "Google", "Chrome", "User Data", "DevToolsActivePort"))
+            candidates.append(os.path.join(local, "Microsoft", "Edge", "User Data", "DevToolsActivePort"))
+            candidates.append(os.path.join(local, "Chromium", "User Data", "DevToolsActivePort"))
+        # 常见备选路径
+        for drive in ("C:", "D:"):
+            alt = os.path.join(drive, os.sep, "Users", os.environ.get("USERNAME", ""), "AppData", "Local",
+                               "Google", "Chrome", "User Data", "DevToolsActivePort")
+            if alt not in candidates:
+                candidates.append(alt)
+    elif sys.platform == "darwin":
+        home = str(Path.home())
+        candidates.append(os.path.join(home, "Library", "Application Support", "Google", "Chrome", "DevToolsActivePort"))
+        candidates.append(os.path.join(home, "Library", "Application Support", "Microsoft Edge", "DevToolsActivePort"))
+    else:
+        home = str(Path.home())
+        candidates.append(os.path.join(home, ".config", "google-chrome", "DevToolsActivePort"))
+        candidates.append(os.path.join(home, ".config", "chromium", "DevToolsActivePort"))
+        candidates.append(os.path.join(home, ".config", "microsoft-edge", "DevToolsActivePort"))
+
+    for filepath in candidates:
+        try:
+            content = open(filepath, "r", encoding="utf-8").read().strip()
+            if not content:
+                logger.debug(f"DevToolsActivePort 文件为空: {filepath}")
+                continue
+            lines = content.splitlines()
+            port = int(lines[0].strip())
+            if port <= 0 or port >= 65536:
+                logger.debug(f"DevToolsActivePort 端口无效: {port}")
+                continue
+            ws_path = lines[1].strip() if len(lines) > 1 else ""
+            port_ok = _is_port_in_use(port)
+            logger.info(f"DevToolsActivePort: port={port}, wsPath={ws_path}, 端口可达={port_ok} ({filepath})")
+            if port_ok:
+                return (port, ws_path)
+            else:
+                logger.warning(f"DevToolsActivePort 文件存在但端口 {port} 不可达，Chrome 可能已关闭远程调试")
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            logger.debug(f"读取 DevToolsActivePort 失败 ({filepath}): {e}")
+            continue
+    logger.info(f"未找到 DevToolsActivePort (搜索了 {len(candidates)} 个路径)")
+    return None
+
 
 def _find_chrome_executable() -> Optional[str]:
     """自动检测系统安装的 Chrome/Edge/Brave 浏览器路径"""
@@ -579,21 +672,31 @@ class PlaywrightBrowser:
         self._pw_context_manager = playwright_async()
         self._playwright = await self._pw_context_manager.__aenter__()
 
-        use_cdp = False
-        if self.browser_mode in ("cdp", "auto"):
-            chrome_path = self.executable_path or _find_chrome_executable()
-            if chrome_path:
-                use_cdp = True
-            elif self.browser_mode == "cdp":
-                raise RuntimeError(
-                    "BROWSER_MODE=cdp 但未找到系统 Chrome/Edge/Brave，"
-                    "请安装浏览器或设置 BROWSER_EXECUTABLE_PATH"
-                )
-
-        if use_cdp:
-            await self._start_cdp(chrome_path)
-        else:
+        if self.browser_mode == "builtin":
             await self._start_builtin()
+            return
+
+        # Step 1: 附着到用户的 Chrome（DevToolsActivePort → HTTP 探测 → 端口扫描）
+        attached = await self._try_attach_existing(self.cdp_port)
+        if attached:
+            return
+
+        # Step 2: 启动系统 Chrome（CDP 模式，真实浏览器指纹）
+        chrome_path = self.executable_path or _find_chrome_executable()
+        if chrome_path:
+            # 如果用户 Chrome 正在运行，先尝试重启以保留登录态
+            if _is_browser_process_running():
+                restarted = await self._restart_browser_with_cdp()
+                if restarted:
+                    return
+            try:
+                await self._start_cdp(chrome_path)
+                return
+            except Exception as e:
+                logger.warning(f"CDP 模式启动失败，回退到内置浏览器: {e}")
+
+        # Step 3: 最终回退到 Playwright 内置 Chromium
+        await self._start_builtin()
 
     @staticmethod
     def _get_persistent_profile_dir() -> str:
@@ -603,17 +706,311 @@ class PlaywrightBrowser:
         os.makedirs(profile_dir, exist_ok=True)
         return profile_dir
 
+    async def _try_attach_existing(self, port: int) -> bool:
+        """尝试附着到用户已有的 Chrome（带登录态，零配置）。
+        策略：
+        1. 读取 DevToolsActivePort 文件获取 WS 路径（chrome://inspect 模式必需）
+        2. 尝试 HTTP /json/version 发现（--remote-debugging-port 模式）
+        3. 扫描常用端口
+        """
+        # --- 策略 1: DevToolsActivePort（最可靠，支持 chrome://inspect） ---
+        devtools = _discover_devtools_port()
+        if devtools:
+            dt_port, ws_path = devtools
+            if ws_path:
+                ws_url = f"ws://127.0.0.1:{dt_port}{ws_path}"
+            else:
+                ws_url = f"ws://127.0.0.1:{dt_port}/devtools/browser"
+            attached = await self._connect_cdp(ws_url, dt_port)
+            if attached:
+                return True
+
+        # --- 策略 2: HTTP 探测（标准 --remote-debugging-port 模式） ---
+        ports_to_try = [port]
+        for p in (9222, 9223, 9224, 9225, 9229):
+            if p not in ports_to_try:
+                ports_to_try.append(p)
+
+        for try_port in ports_to_try:
+            ws_url = await self._discover_via_http(try_port)
+            if ws_url:
+                attached = await self._connect_cdp(ws_url, try_port)
+                if attached:
+                    return True
+                attached = await self._connect_cdp(f"http://127.0.0.1:{try_port}", try_port)
+                if attached:
+                    return True
+
+        return False
+
+    async def _discover_via_http(self, port: int) -> str:
+        """通过 HTTP /json/version 获取 WebSocket URL，返回空串表示失败"""
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"http://127.0.0.1:{port}/json/version")
+                if resp.status_code != 200:
+                    return ""
+                info = resp.json()
+                browser_name = info.get("Browser", "unknown")
+                ws_url = info.get("webSocketDebuggerUrl", "")
+                logger.info(f"HTTP 发现 Chrome: {browser_name} (port={port})")
+                return ws_url
+        except Exception:
+            return ""
+
+    async def _connect_cdp(self, endpoint: str, port: int) -> bool:
+        """通过指定 endpoint 连接 Chrome CDP 并初始化 context/page"""
+        try:
+            logger.info(f"尝试连接: {endpoint}")
+            self._browser = await self._playwright.chromium.connect_over_cdp(
+                endpoint, timeout=15000,
+            )
+        except Exception as e:
+            logger.debug(f"connect_over_cdp({endpoint}) 失败: {e}")
+            return False
+
+        try:
+            if self._browser.contexts:
+                self._context = self._browser.contexts[0]
+            else:
+                self._context = await self._browser.new_context(
+                    viewport=self.viewport,
+                    accept_downloads=True,
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                )
+
+            if _EXTENSION_JS:
+                try:
+                    await self._context.add_init_script(_EXTENSION_JS)
+                except Exception:
+                    pass
+
+            self._page = await self._context.new_page()
+            self._page.set_default_timeout(self.timeout)
+            self._using_cdp = True
+            self._chrome_process = None
+            logger.info(f"已附着到用户 Chrome (port={port})，天然携带登录态 ✓")
+            return True
+        except Exception as e:
+            logger.warning(f"Chrome 已连接但初始化失败: {e}")
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+            return False
+
+    @staticmethod
+    def _get_user_chrome_profile() -> str | None:
+        """获取用户真实 Chrome 配置目录（带登录态/Cookie/书签）。
+        如果浏览器正在运行，返回 None 避免配置目录锁冲突。
+        """
+        if _is_browser_process_running():
+            logger.debug("检测到浏览器进程正在运行，跳过用户配置目录以避免锁冲突")
+            return None
+
+        candidates = []
+        if platform.system() == "Windows":
+            local = os.environ.get("LOCALAPPDATA", "")
+            if local:
+                candidates.append(os.path.join(local, "Google", "Chrome", "User Data"))
+                candidates.append(os.path.join(local, "Microsoft", "Edge", "User Data"))
+        elif platform.system() == "Darwin":
+            home = Path.home()
+            candidates.append(str(home / "Library" / "Application Support" / "Google" / "Chrome"))
+            candidates.append(str(home / "Library" / "Application Support" / "Microsoft Edge"))
+        else:
+            home = Path.home()
+            candidates.append(str(home / ".config" / "google-chrome"))
+            candidates.append(str(home / ".config" / "microsoft-edge"))
+
+        for c in candidates:
+            if os.path.isdir(c):
+                singleton = os.path.join(c, "SingletonLock")
+                if platform.system() != "Windows" and os.path.exists(singleton):
+                    continue
+                return c
+        return None
+
+    async def _restart_browser_with_cdp(self) -> bool:
+        """关闭用户 Chrome 并以 CDP 模式重启（保留标签页和登录态）。
+        仅在检测到 Chrome 正在运行但无 CDP 端口时调用。
+        """
+        if sys.platform != "win32":
+            return False
+
+        chrome_path = self.executable_path or _find_chrome_executable()
+        if not chrome_path:
+            return False
+
+        local = os.environ.get("LOCALAPPDATA", "")
+        if not local:
+            return False
+
+        chrome_name = os.path.basename(chrome_path).lower()
+        if "edge" in chrome_name or "msedge" in chrome_name:
+            process_name = "msedge.exe"
+            user_data_dir = os.path.join(local, "Microsoft", "Edge", "User Data")
+        else:
+            process_name = "chrome.exe"
+            user_data_dir = os.path.join(local, "Google", "Chrome", "User Data")
+
+        if not os.path.isdir(user_data_dir):
+            return False
+
+        logger.info(
+            f"检测到 {process_name} 运行中但未开启 CDP，"
+            "正在自动重启以启用远程调试（标签页和登录态将保留）..."
+        )
+
+        # Phase 1: 优雅关闭（保存会话状态）
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", process_name],
+                capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"关闭 {process_name} 失败: {e}")
+            return False
+
+        # 等待进程退出（最多 8 秒）
+        exited = False
+        for i in range(16):
+            await asyncio.sleep(0.5)
+            if not _is_browser_process_running():
+                exited = True
+                logger.debug(f"{process_name} 已退出 ({(i+1)*0.5:.1f}s)")
+                break
+
+        # Phase 2: 如果优雅关闭没成功，强制终止
+        if not exited:
+            logger.info(f"{process_name} 未响应优雅关闭，执行强制终止...")
+            try:
+                subprocess.run(
+                    ["taskkill", "/IM", process_name, "/F"],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+            for _ in range(6):
+                await asyncio.sleep(0.5)
+                if not _is_browser_process_running():
+                    exited = True
+                    break
+
+        if not exited:
+            logger.warning(f"{process_name} 无法终止，放弃重启")
+            return False
+
+        # 等待配置目录锁释放
+        lock_file = os.path.join(user_data_dir, "lockfile")
+        for _ in range(6):
+            await asyncio.sleep(0.5)
+            if not os.path.exists(lock_file):
+                break
+        else:
+            await asyncio.sleep(1)
+
+        port = self.cdp_port
+        if _is_port_in_use(port):
+            for fp in range(port + 1, port + 10):
+                if not _is_port_in_use(fp):
+                    port = fp
+                    break
+
+        args = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--restore-last-session",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+        ]
+
+        if self.headless:
+            args.append("--headless=new")
+
+        logger.info(f"正在启动 Chrome (CDP port={port})...")
+        self._chrome_process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if not await _wait_for_cdp_ready(port, timeout=30):
+            rc = self._chrome_process.poll()
+            logger.warning(
+                f"Chrome 重启后 CDP 未就绪 (进程状态: "
+                f"{'已退出 code=' + str(rc) if rc is not None else '运行中'})"
+            )
+            if rc is not None:
+                self._chrome_process = None
+            return False
+
+        try:
+            cdp_url = f"http://127.0.0.1:{port}"
+            self._browser = await self._playwright.chromium.connect_over_cdp(
+                cdp_url, timeout=15000,
+            )
+
+            if self._browser.contexts:
+                self._context = self._browser.contexts[0]
+            else:
+                self._context = await self._browser.new_context(
+                    viewport=self.viewport,
+                    accept_downloads=True,
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                )
+
+            await self._context.add_init_script(_STEALTH_JS)
+            if _EXTENSION_JS:
+                try:
+                    await self._context.add_init_script(_EXTENSION_JS)
+                except Exception:
+                    pass
+
+            self._page = await self._context.new_page()
+            self._page.set_default_timeout(self.timeout)
+            self._using_cdp = True
+            self._user_data_dir = user_data_dir
+            logger.info(
+                f"Chrome 已重启并连接成功 (port={port})，登录态已保留"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Chrome 重启后连接失败: {e}")
+            return False
+
     async def _start_cdp(self, chrome_path: str):
         """启动系统 Chrome 并通过 CDP 连接（真实浏览器指纹，绕过反爬）"""
-        self._user_data_dir = self._get_persistent_profile_dir()
+        user_profile = self._get_user_chrome_profile()
+        if user_profile:
+            self._user_data_dir = user_profile
+            logger.info(f"使用用户 Chrome 配置目录（携带登录态）: {user_profile}")
+        else:
+            self._user_data_dir = self._get_persistent_profile_dir()
+            logger.info("用户 Chrome 配置不可用，使用独立配置目录")
         self._owns_user_data_dir = False
+
+        actual_port = self.cdp_port
+        if _is_port_in_use(actual_port):
+            for fallback_port in range(actual_port + 1, actual_port + 10):
+                if not _is_port_in_use(fallback_port):
+                    logger.info(f"CDP 端口 {actual_port} 已占用，使用备选端口 {fallback_port}")
+                    actual_port = fallback_port
+                    break
 
         stderr_dir = tempfile.mkdtemp(prefix="lingque_cdp_log_")
         stderr_path = os.path.join(stderr_dir, "chrome_stderr.log")
 
         args = [
             chrome_path,
-            f"--remote-debugging-port={self.cdp_port}",
+            f"--remote-debugging-port={actual_port}",
             f"--user-data-dir={self._user_data_dir}",
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -621,6 +1018,8 @@ class PlaywrightBrowser:
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+            "--hide-crash-restore-bubble",
             "--disable-sync",
             "--disable-background-networking",
             "--disable-component-update",
@@ -643,13 +1042,18 @@ class PlaywrightBrowser:
         args.append("about:blank")
 
         stderr_file = open(stderr_path, "w")
-        self._chrome_process = subprocess.Popen(
-            args,
+        popen_kwargs = dict(
             stdout=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             stderr=stderr_file,
         )
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+            )
+        self._chrome_process = subprocess.Popen(args, **popen_kwargs)
 
-        if not await _wait_for_cdp_ready(self.cdp_port, timeout=20):
+        if not await _wait_for_cdp_ready(actual_port, timeout=20):
             self._chrome_process.terminate()
             chrome_err = ""
             try:
@@ -662,7 +1066,7 @@ class PlaywrightBrowser:
             except Exception:
                 pass
             raise RuntimeError(
-                f"Chrome CDP 启动超时 (port={self.cdp_port})"
+                f"Chrome CDP 启动超时 (port={actual_port})"
                 + (f"\nChrome 错误: {chrome_err}" if chrome_err else "")
             )
         try:
@@ -671,7 +1075,7 @@ class PlaywrightBrowser:
         except Exception:
             pass
 
-        cdp_url = f"http://127.0.0.1:{self.cdp_port}"
+        cdp_url = f"http://127.0.0.1:{actual_port}"
         self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
 
         if self._browser.contexts:
@@ -891,12 +1295,12 @@ class PlaywrightBrowser:
             return BrowserResult(success=False, error="浏览器未启动")
         try:
             await self.load_cookies_for_url(url)
-            await self._page.goto(url, wait_until=wait_until)
+            await self._page.goto(url, wait_until=wait_until, timeout=15000)
             try:
                 await self._page.evaluate(_STEALTH_JS)
             except Exception:
                 pass
-            await self.wait_for_page_ready(timeout=12)
+            await self.wait_for_page_ready(timeout=3)
             title = await self._page.title()
             return BrowserResult(success=True, data=f"已导航到: {url}\n页面标题: {title}")
         except Exception as e:
@@ -1004,6 +1408,27 @@ class PlaywrightBrowser:
             
         except Exception as e:
             logger.debug(f"鼠标移动失败: {e}")
+
+    async def rpa_move_mouse_to_point(self, x: float, y: float):
+        """平滑移动鼠标到指定坐标（贝塞尔曲线轨迹）"""
+        if not RPAConfig.enabled:
+            return
+        try:
+            viewport = self._page.viewport_size
+            if viewport:
+                start_x = random.uniform(viewport["width"] * 0.3, viewport["width"] * 0.7)
+                start_y = random.uniform(viewport["height"] * 0.3, viewport["height"] * 0.7)
+            else:
+                start_x, start_y = 400, 300
+
+            path = _generate_mouse_path(start_x, start_y, x, y, RPAConfig.mouse_steps)
+            step_delay = RPAConfig.mouse_move_duration / len(path)
+            for px, py in path:
+                await self._page.mouse.move(px, py)
+                await asyncio.sleep(step_delay)
+            await asyncio.sleep(RPAConfig.click_delay)
+        except Exception as e:
+            logger.debug(f"鼠标移动到坐标失败: {e}")
 
     async def rpa_click(self, locator) -> BrowserResult:
         """RPA 风格点击（平滑移动鼠标 + 点击，绕过反爬）"""
@@ -1761,6 +2186,15 @@ async def _snapshot_via_extension(browser: PlaywrightBrowser, max_elements: int 
     page_els = [e for e in raw if not e.get("in_dialog")]
     ordered = dialog_els + page_els
 
+    role_counts: dict[str, int] = {}
+    for e in ordered:
+        r = e.get("role", "")
+        lbl = _ROLE_LABELS.get(r, r)
+        role_counts[lbl] = role_counts.get(lbl, 0) + 1
+    if role_counts:
+        summary_parts = [f"{lbl}×{cnt}" for lbl, cnt in role_counts.items() if cnt > 0]
+        lines.append(f"元素概要: {' | '.join(summary_parts[:8])}")
+
     if dialog_els:
         lines.append(f"弹窗内元素 ({len(dialog_els)} 个，优先操作这些):")
     elif ordered:
@@ -1792,18 +2226,38 @@ async def _snapshot_via_extension(browser: PlaywrightBrowser, max_elements: int 
 
         parts = [f"  [{ref}] {label} \"{name}\""]
         states = []
+        state_str = el.get("state") or ""
+        if state_str:
+            for s in state_str.split(","):
+                s = s.strip()
+                if s == "disabled": states.append("禁用")
+                elif s == "required": states.append("必填")
+                elif s == "checked": states.append("✓已选")
+                elif s == "expanded": states.append("展开")
+                elif s == "collapsed": states.append("收起")
+                elif s == "selected": states.append("已选中")
+                elif s == "readonly": states.append("只读")
+                elif s == "empty": states.append("空")
+                elif s == "filled": states.append("已填")
+        else:
+            if el.get("checked"): states.append("✓已选")
+            if el.get("disabled"): states.append("禁用")
+            if el.get("required"): states.append("必填")
         if el.get("value"):
             states.append(f"值=\"{str(el['value'])[:20]}\"")
-        if el.get("checked"):
-            states.append("✓已选")
-        if el.get("disabled"):
-            states.append("禁用")
-        if el.get("required"):
-            states.append("必填")
         if el.get("in_shadow"):
             states.append("Shadow")
         if states:
             parts.append(f"  ({', '.join(states)})")
+
+        ctx = el.get("context") or ""
+        if ctx:
+            parts.append(f"  [{ctx}]")
+
+        aria_desc = el.get("ariaDescription") or ""
+        if aria_desc:
+            parts.append(f"  描述:{aria_desc}")
+
         lines.append("".join(parts))
 
         sels = el.get("selectors") or {}
@@ -1811,6 +2265,9 @@ async def _snapshot_via_extension(browser: PlaywrightBrowser, max_elements: int 
             "role": role, "name": name, "nth": nth,
             "selectors": sels,
             "css": sels.get("uniquePath") or sels.get("css") or "",
+            "bbox": el.get("bbox"),
+            "context": ctx,
+            "state": state_str,
         }
         ref_map[ref] = ref_info
 
@@ -1821,6 +2278,73 @@ async def _snapshot_via_extension(browser: PlaywrightBrowser, max_elements: int 
     return "\n".join(lines), ref_map
 
 
+def _is_som_enabled() -> bool:
+    return os.environ.get("BROWSER_SOM_ENABLED", "true").lower() in ("true", "1", "yes")
+
+
+_SOM_INJECT_JS = """
+(labels) => {
+    const container = document.createElement('div');
+    container.id = '__lingque_som_overlay';
+    container.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483647;';
+    const colors = ['#E53E3E','#319795','#3182CE','#38A169','#D69E2E','#805AD5','#DD6B20','#E53E3E','#2B6CB0','#718096'];
+    labels.forEach((item, idx) => {
+        const badge = document.createElement('div');
+        const bg = colors[idx % colors.length];
+        badge.style.cssText = `position:fixed;left:${item.x}px;top:${item.y}px;background:${bg};color:#fff;font:bold 10px/1.2 monospace;padding:1px 4px;border-radius:3px;box-shadow:0 1px 3px rgba(0,0,0,0.4);pointer-events:none;z-index:2147483647;white-space:nowrap;`;
+        badge.textContent = item.label;
+        container.appendChild(badge);
+    });
+    document.body.appendChild(container);
+}
+"""
+
+_SOM_REMOVE_JS = """
+() => {
+    const el = document.getElementById('__lingque_som_overlay');
+    if (el) el.remove();
+}
+"""
+
+
+async def _screenshot_with_som(browser: PlaywrightBrowser, ref_map: dict) -> Optional[bytes]:
+    """
+    Set-of-Mark: inject numbered labels on each element's bbox, take screenshot, remove labels.
+    Returns screenshot bytes or None on failure.
+    """
+    page = browser._page
+    if not page or not ref_map:
+        return None
+
+    labels = []
+    for ref_id, info in ref_map.items():
+        bbox = info.get("bbox")
+        if not bbox:
+            continue
+        x = bbox.get("x", 0)
+        y = bbox.get("y", 0)
+        if x < 0 or y < 0:
+            continue
+        labels.append({"label": ref_id, "x": x, "y": max(y - 14, 0)})
+
+    if not labels:
+        return None
+
+    try:
+        await page.evaluate(_SOM_INJECT_JS, labels)
+        await asyncio.sleep(0.05)
+        screenshot_bytes = await page.screenshot(full_page=False, type="jpeg", quality=75)
+        await page.evaluate(_SOM_REMOVE_JS)
+        return screenshot_bytes
+    except Exception as e:
+        logger.debug(f"SoM 截图失败: {e}")
+        try:
+            await page.evaluate(_SOM_REMOVE_JS)
+        except Exception:
+            pass
+        return None
+
+
 async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80) -> tuple[str, dict]:
     """
     增强版页面快照。
@@ -1828,16 +2352,21 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
 
     返回: (structured_info_text, ref_map)
     """
+    _t0 = time.time()
     if not browser._page:
         return "浏览器未打开", {}
 
     ext_result = await _snapshot_via_extension(browser, max_elements)
     if ext_result is not None:
+        logger.info(f"快照完成(扩展): {time.time()-_t0:.1f}s")
         return ext_result
 
     # 收集页面结构信息
     try:
-        page_info = await browser._page.evaluate(_JS_PAGE_STRUCTURE)
+        page_info = await asyncio.wait_for(
+            browser._page.evaluate(_JS_PAGE_STRUCTURE),
+            timeout=5.0,
+        )
     except Exception:
         page_info = {}
 
@@ -1877,7 +2406,10 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
     snapshot_source = "aria"
 
     try:
-        aria_yaml = await browser._page.locator("body").aria_snapshot()
+        aria_yaml = await asyncio.wait_for(
+            browser._page.locator("body").aria_snapshot(),
+            timeout=8.0,
+        )
         if aria_yaml:
             interactive, structural = _parse_aria_snapshot(aria_yaml, max_elements + 10)
             raw_elements = interactive
@@ -1887,6 +2419,8 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
                                for s in structural[:6]]
                 if struct_strs:
                     lines.append(f"页面内容: {' | '.join(struct_strs)}")
+    except asyncio.TimeoutError:
+        logger.info("aria_snapshot 超时(8s)，回退到 JS 扫描")
     except Exception as e:
         logger.debug(f"aria_snapshot 不可用: {e}")
 
@@ -1898,8 +2432,14 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
         except Exception as e:
             logger.warning(f"JS 元素提取也失败: {e}")
 
-    # 扫描 iframe
-    iframe_elements = await _scan_iframes(browser._page, max_elements=20)
+    # 扫描 iframe（限时）
+    try:
+        iframe_elements = await asyncio.wait_for(
+            _scan_iframes(browser._page, max_elements=20),
+            timeout=3.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        iframe_elements = []
     has_iframe_elements = len(iframe_elements) > 0
 
     if not raw_elements and not iframe_elements:
@@ -1930,6 +2470,15 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
     page_elements = [el for el in elements if not el.get("in_dialog")]
     ordered_elements = dialog_elements + page_elements
 
+    role_counts: dict[str, int] = {}
+    for el in ordered_elements:
+        r = el.get("role", "")
+        lbl = _ROLE_LABELS.get(r, r)
+        role_counts[lbl] = role_counts.get(lbl, 0) + 1
+    if role_counts:
+        summary_parts = [f"{lbl}×{cnt}" for lbl, cnt in role_counts.items() if cnt > 0]
+        lines.append(f"元素概要: {' | '.join(summary_parts[:8])}")
+
     if dialog_elements:
         lines.append(f"弹窗内元素 ({len(dialog_elements)} 个，优先操作这些):")
     elif ordered_elements:
@@ -1959,6 +2508,10 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
             states.append("禁用")
         if el.get("expanded") is not None:
             states.append("展开" if el["expanded"] else "收起")
+        if el.get("selected"):
+            states.append("已选中")
+        if el.get("pressed"):
+            states.append("已按下")
         if el.get("required"):
             states.append("必填")
         if states:
@@ -1969,6 +2522,8 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
         ref_info: dict = {"role": role, "name": name, "nth": el.get("nth")}
         if snapshot_source == "js" and el.get("css"):
             ref_info["css"] = el["css"]
+        if el.get("bbox"):
+            ref_info["bbox"] = el["bbox"]
         ref_map[ref] = ref_info
 
     if len(raw_elements) > max_elements:
@@ -2015,6 +2570,7 @@ async def _snapshot_elements(browser: PlaywrightBrowser, max_elements: int = 80)
                 ref_info["css"] = el["css"]
             ref_map[ref] = ref_info
 
+    logger.info(f"快照完成({snapshot_source}): {len(ref_map)}个元素, {time.time()-_t0:.1f}s")
     return "\n".join(lines), ref_map
 
 
@@ -2037,14 +2593,59 @@ def _to_ai_friendly_error(exc: Exception, ref: str = "") -> str:
     return f"操作元素 {ref} 失败: {msg}"
 
 
+def _is_selfheal_enabled() -> bool:
+    return os.environ.get("BROWSER_SELFHEAL_ENABLED", "true").lower() in ("true", "1", "yes")
+
+
 def _resolve_ref(page, ref: str, ref_map: dict):
-    """将元素引用解析为 Playwright locator。支持: eN 编号 / CSS 选择器 / XPath。
-    当 ref_map 含扩展多选择器时，按稳定性依次尝试。"""
+    """将元素引用解析为 Playwright locator。
+    支持: eN 编号 / CSS 选择器 / XPath。
+    多策略自愈定位（按稳定性降序）:
+      1. data-attr  2. ARIA role+name  3. CSS unique  4. XPath
+      5. text fuzzy  6. bbox coordinate click
+    """
     if _REF_PATTERN.match(ref) and ref in ref_map:
         info = ref_map[ref]
-
         sels = info.get("selectors")
-        if sels and isinstance(sels, dict):
+
+        if sels and isinstance(sels, dict) and _is_selfheal_enabled():
+            _strategies = [
+                ("dataAttr", sels.get("dataAttr", "")),
+                ("aria", sels.get("aria", "")),
+                ("uniquePath", sels.get("uniquePath", "")),
+                ("css", sels.get("css", "")),
+                ("xpath", sels.get("xpath", "")),
+                ("text", sels.get("text", "")),
+            ]
+            for key, sel in _strategies:
+                if not sel:
+                    continue
+                try:
+                    if key == "aria" and sel.startswith("role:"):
+                        parts = sel.split(":", 2)
+                        if len(parts) == 3:
+                            loc = page.get_by_role(parts[1], name=parts[2]).first
+                            return loc
+                        continue
+                    if key == "text":
+                        loc = page.get_by_text(sel, exact=False).first
+                        return loc
+                    if key == "xpath":
+                        loc = page.locator(f"xpath={sel}").first
+                        return loc
+                    loc = page.locator(sel).first
+                    return loc
+                except Exception:
+                    continue
+
+            bbox = info.get("bbox")
+            if bbox and bbox.get("w") and bbox.get("h"):
+                cx = bbox["x"] + bbox["w"] / 2
+                cy = bbox["y"] + bbox["h"] / 2
+                info["_bbox_fallback"] = {"x": cx, "y": cy}
+                logger.info(f"所有选择器策略耗尽，将回退到 bbox 坐标点击: ({cx:.0f}, {cy:.0f})")
+
+        elif sels and isinstance(sels, dict):
             for key in ("dataAttr", "uniquePath", "css"):
                 sel = sels.get(key, "")
                 if sel and not sel.startswith("role:"):
@@ -2308,6 +2909,7 @@ class _SharedBrowser:
         cls._page_states = {}
         cls._ref_map = {}
         cls._network_log = []
+        cls._last_som_b64 = ""
 
     @classmethod
     async def get(cls) -> PlaywrightBrowser:
@@ -2434,6 +3036,7 @@ class _SharedBrowser:
 
     _last_snapshot_info: str = ""
     _snapshot_url: str = ""
+    _last_som_b64: str = ""
     SNAPSHOT_CACHE_TTL: float = 1.5
 
     @classmethod
@@ -2452,6 +3055,23 @@ class _SharedBrowser:
         cls._last_snapshot_time = now
         cls._last_snapshot_info = info
         cls._snapshot_url = current_url
+
+        cls._last_som_b64 = ""
+        if ref_map and _is_som_enabled() and cls._llm_router:
+            try:
+                import base64
+                som_bytes = await asyncio.wait_for(
+                    _screenshot_with_som(browser, ref_map),
+                    timeout=8.0,
+                )
+                if som_bytes:
+                    cls._last_som_b64 = f"data:image/jpeg;base64,{base64.b64encode(som_bytes).decode('utf-8')}"
+                    logger.debug(f"SoM 截图已生成 ({len(som_bytes)} bytes)")
+            except asyncio.TimeoutError:
+                logger.info("SoM 截图超时(8s)，跳过")
+            except Exception as e:
+                logger.debug(f"SoM 截图生成失败: {e}")
+
         return info, ref_map
 
 
@@ -2464,9 +3084,11 @@ def _not_active_error() -> SkillResult:
 @register(
     name="browser_open",
     description=(
-        "在浏览器中打开网页。自动加载该网站已保存的 Cookie（保持登录状态）。"
-        "返回页面元素快照：每个可交互元素有编号 [e1] [e2]...，后续用编号操作。"
-        "浏览器保持打开，适合多步任务。"
+        "在浏览器中打开网页（优先打开网站首页，通过 GUI 操作搜索/导航，而不是直接构造搜索 URL）。"
+        "自动加载 Cookie 保持登录状态，返回元素快照 [e1] [e2]... 编号。"
+        "搜索任务: 打开首页 → type 搜索框 → click 搜索按钮。"
+        "反爬平台(淘宝/闲鱼/小红书等): 必须从首页 GUI 操作，不要构造 URL。"
+        "如有该站点的操作经验会自动加载。"
     ),
     parameters={
         "type": "object",
@@ -2486,12 +3108,20 @@ async def browser_open(url: str) -> SkillResult:
 
         info, ref_map = await _SharedBrowser.do_snapshot()
 
-        # 元素太少可能是页面还在加载，再等一轮
         if len(ref_map) < 2:
-            await browser.wait_for_page_ready(timeout=5)
+            await browser.wait_for_page_ready(timeout=3)
             info, ref_map = await _SharedBrowser.do_snapshot()
 
-        return SkillResult(success=True, data=info)
+        try:
+            from .site_experience import load_experience_for_url
+            site_exp = load_experience_for_url(url)
+            if site_exp:
+                info = f"[站点经验已加载，参考以下操作模式]\n{site_exp[:500]}\n---\n{info}"
+        except Exception:
+            pass
+
+        images = [_SharedBrowser._last_som_b64] if _SharedBrowser._last_som_b64 else []
+        return SkillResult(success=True, data=info, images=images)
     except ImportError as e:
         return SkillResult(success=False, error=str(e))
     except Exception as e:
@@ -2502,7 +3132,8 @@ async def browser_open(url: str) -> SkillResult:
     name="browser_navigate",
     description=(
         "在已打开的浏览器中导航到新 URL（不关闭浏览器）。"
-        "与 browser_open 的区别：browser_open 适合首次打开，browser_navigate 适合会话中跳转。"
+        "适合会话中跳转到已知页面。如果需要搜索，优先在当前页面用 GUI 操作（输入搜索框+点按钮），"
+        "而不是构造搜索 URL 导航。使用 DOM 中提取的完整链接（含参数），不要手动裁剪 URL。"
     ),
     parameters={
         "type": "object",
@@ -2523,7 +3154,8 @@ async def browser_navigate(url: str) -> SkillResult:
         await browser.wait_for_page_ready(timeout=8)
 
         info, _ = await _SharedBrowser.do_snapshot(force=True)
-        return SkillResult(success=True, data=info)
+        images = [_SharedBrowser._last_som_b64] if _SharedBrowser._last_som_b64 else []
+        return SkillResult(success=True, data=info, images=images)
     except Exception as e:
         return SkillResult(success=False, error=f"导航失败: {e}")
 
@@ -2545,7 +3177,8 @@ async def browser_snapshot() -> SkillResult:
         return _not_active_error()
     try:
         info, _ = await _SharedBrowser.do_snapshot(force=True)
-        return SkillResult(success=True, data=info)
+        images = [_SharedBrowser._last_som_b64] if _SharedBrowser._last_som_b64 else []
+        return SkillResult(success=True, data=info, images=images)
     except Exception as e:
         return SkillResult(success=False, error=f"快照失败: {e}")
 
@@ -2883,6 +3516,9 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
         old_title = await browser._page.title()
         
         locator = await _smart_locate(browser._page, r, rmap, "click")
+
+        r_info = rmap.get(r, {})
+        bbox_fb = r_info.get("_bbox_fallback")
         
         # 快速检查元素可交互
         try:
@@ -2893,10 +3529,18 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
                     success=False, 
                     error=f"元素 {r} 当前处于禁用状态，无法点击。请检查是否需要先完成其他操作。"
                 )
+            bbox_fb = None
         except Exception as e:
             logger.debug(f"等待元素可见超时: {e}")
-        
-        if rpa_mode and RPAConfig.enabled:
+            if not bbox_fb:
+                pass
+
+        if bbox_fb:
+            logger.info(f"使用 bbox 坐标回退点击: ({bbox_fb['x']:.0f}, {bbox_fb['y']:.0f})")
+            if rpa_mode and RPAConfig.enabled:
+                await browser.rpa_move_mouse_to_point(bbox_fb["x"], bbox_fb["y"])
+            await browser._page.mouse.click(bbox_fb["x"], bbox_fb["y"])
+        elif rpa_mode and RPAConfig.enabled:
             await browser.rpa_move_mouse_to(locator)
             await locator.click(timeout=8000)
         else:
@@ -2939,10 +3583,11 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
 @register(
     name="browser_type",
     description=(
-        "在输入框中输入文字。ref 是元素编号（如 e1）、CSS 选择器、XPath、或 placeholder 文本。"
+        "在输入框中输入文字（搜索的首选方式：先 open 首页，再 type 搜索框内容）。"
+        "ref 是元素编号（如 e1）、CSS 选择器、XPath、或 placeholder 文本。"
         "设置 press_enter=true 可按回车提交（如搜索框）。"
         "设置 clear=true 会先清空输入框再输入。"
-        "v3.0 RPA 模式：元素高亮 + 平滑移动鼠标 + 人类化逐字输入（随机延迟）。"
+        "RPA 模式：元素高亮 + 平滑移动鼠标 + 人类化逐字输入（随机延迟）。"
     ),
     parameters={
         "type": "object",
@@ -3806,6 +4451,41 @@ async def browser_save_cookies() -> SkillResult:
         return SkillResult(success=False, error="当前没有 Cookie 可保存")
     except Exception as e:
         return SkillResult(success=False, error=f"保存 Cookie 失败: {e}")
+
+
+@register(
+    name="browser_save_site_experience",
+    description=(
+        "保存当前网站的操作经验（平台特征、有效模式、已知陷阱）。"
+        "在成功完成复杂浏览操作后主动调用，经验会按域名存储，下次操作同一网站时自动加载。"
+        "内容应包含经过验证的事实，不写未确认的猜测。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "domain": {
+                "type": "string",
+                "description": "网站域名或 URL，如 taobao.com 或 https://www.xiaohongshu.com",
+            },
+            "experience": {
+                "type": "string",
+                "description": "经验内容，建议包含：## 平台特征 / ## 有效模式 / ## 已知陷阱",
+            },
+        },
+        "required": ["domain", "experience"],
+    },
+    risk_level="low",
+    category="browser",
+)
+async def browser_save_site_experience(domain: str, experience: str) -> SkillResult:
+    try:
+        from .site_experience import save_experience
+        ok = save_experience(domain, experience)
+        if ok:
+            return SkillResult(success=True, data=f"站点经验已保存: {domain}")
+        return SkillResult(success=False, error="保存失败: 域名或内容为空")
+    except Exception as e:
+        return SkillResult(success=False, error=f"保存站点经验失败: {e}")
 
 
 @register(
