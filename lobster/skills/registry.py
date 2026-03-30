@@ -245,22 +245,33 @@ class SkillRegistry:
                 _log_args = {k: ("***" if k == "value" else v) for k, v in arguments.items()}
             logger.info(f"执行技能: {name}({_log_args})")
 
-            if skill.risk_level in ("medium", "high"):
-                try:
-                    _get_security_logger().info(
-                        f"EXEC | risk={skill.risk_level} | skill={name} | args={_log_args}"
-                    )
-                except Exception:
-                    pass
+            try:
+                _get_security_logger().info(
+                    f"EXEC | risk={skill.risk_level} | skill={name} | args={_log_args}"
+                )
+            except Exception:
+                pass
 
             result = await skill.handler(**arguments)
             if not isinstance(result, SkillResult):
                 result = SkillResult(success=True, data=str(result))
             logger.info(f"技能 {name} 执行完成")
+            try:
+                _get_security_logger().info(
+                    f"DONE | skill={name} | success={result.success}"
+                )
+            except Exception:
+                pass
             return result
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"技能 {name} 执行失败: {error_msg}")
+            try:
+                _get_security_logger().info(
+                    f"FAIL | skill={name} | error={error_msg[:200]}"
+                )
+            except Exception:
+                pass
             return SkillResult(success=False, error=error_msg)
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:

@@ -131,7 +131,7 @@ class AgentConfig(BaseSettings):
     # 默认工具执行超时（秒）
     tool_timeout: int = Field(120, alias="AGENT_TOOL_TIMEOUT")
     # 单段最大循环轮次
-    max_loops: int = Field(25, alias="AGENT_MAX_LOOPS")
+    max_loops: int = Field(30, alias="AGENT_MAX_LOOPS")
     # 长任务自动续航次数（0=禁用，每次续航自动压缩上下文并继续，总步数=max_loops*(1+auto_continue)）
     auto_continue: int = Field(2, alias="AGENT_AUTO_CONTINUE")
     # LLM 单次最大输出 token 数（0=不限制，按模型自身上限输出；设正整数则显式限制）
@@ -185,7 +185,7 @@ class BrowserConfig(BaseSettings):
 class SecurityConfig(BaseSettings):
     model_config = _ENV_CONFIG
     require_confirmation: bool = Field(True, alias="REQUIRE_CONFIRMATION")
-    max_tool_loops: int = Field(25, alias="MAX_TOOL_LOOPS")
+    max_tool_loops: int = Field(30, alias="MAX_TOOL_LOOPS")
     allowed_paths: str = Field("", alias="ALLOWED_PATHS")
 
     def get_allowed_paths(self) -> list[str]:

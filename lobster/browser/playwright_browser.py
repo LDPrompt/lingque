@@ -48,6 +48,7 @@ class RPAConfig:
     type_delay_max: int = 60                # 输入最大延迟（毫秒）
     click_delay: float = 0.03               # 点击前停顿（秒）
     scroll_smooth: bool = True              # 是否平滑滚动
+    fast_threshold: int = 20                # 长文本快速输入阈值（字符数）
 
     @classmethod
     def from_env(cls):
@@ -56,6 +57,7 @@ class RPAConfig:
         cls.mouse_move_duration = float(os.environ.get("RPA_MOUSE_DURATION", "0.15"))
         cls.type_delay_min = int(os.environ.get("RPA_TYPE_DELAY_MIN", "20"))
         cls.type_delay_max = int(os.environ.get("RPA_TYPE_DELAY_MAX", "60"))
+        cls.fast_threshold = int(os.environ.get("RPA_FAST_THRESHOLD", "20"))
 
 
 # ==================== RPA 工具函数 ====================
@@ -156,6 +158,7 @@ _SMOOTH_SCROLL_JS = """
 """
 
 logger = logging.getLogger("lingque.browser.playwright")
+_perf_logger = logging.getLogger("lingque.browser.perf")
 
 playwright_async = None
 
@@ -1226,6 +1229,7 @@ class PlaywrightBrowser:
         if not self._page:
             return "浏览器未启动"
 
+        _perf_t0 = time.perf_counter()
         start = time.time()
 
         # 阶段 1: 等 DOM 加载（上限 5s）
@@ -1288,6 +1292,7 @@ class PlaywrightBrowser:
                 f"文字{last_state.get('textLen', 0)}字, "
                 f"图片{last_state.get('loadedImg', 0)}/{last_state.get('totalImg', 0)}"
             )
+        _perf_logger.debug(f"wait_for_page_ready {(time.perf_counter()-_perf_t0)*1000:.0f}ms timeout={timeout}")
         return last_state.get("reason", "timeout") if last_state else "timeout"
 
     async def goto(self, url: str, wait_until: str = "domcontentloaded") -> BrowserResult:
@@ -3037,10 +3042,12 @@ class _SharedBrowser:
     _last_snapshot_info: str = ""
     _snapshot_url: str = ""
     _last_som_b64: str = ""
-    SNAPSHOT_CACHE_TTL: float = 1.5
+    SNAPSHOT_CACHE_TTL: float = 3.0
 
     @classmethod
-    async def do_snapshot(cls, force: bool = False) -> tuple[str, dict]:
+    async def do_snapshot(cls, force: bool = False, with_som: bool = True) -> tuple[str, dict]:
+        """获取页面快照。with_som=False 时跳过 SoM 截图（轻量模式，提速 1-3s）。"""
+        _perf_t0 = time.perf_counter()
         browser = await cls.get()
         now = time.time()
         current_url = browser._page.url if browser._page else ""
@@ -3049,29 +3056,38 @@ class _SharedBrowser:
                 and cls._last_snapshot_info
                 and current_url == cls._snapshot_url
                 and (now - cls._last_snapshot_time) < cls.SNAPSHOT_CACHE_TTL):
+            _perf_logger.debug(f"do_snapshot cache_hit {(time.perf_counter()-_perf_t0)*1000:.0f}ms")
             return cls._last_snapshot_info, cls._ref_map
+
+        _perf_t1 = time.perf_counter()
         info, ref_map = await _snapshot_elements(browser)
+        _perf_scan = (time.perf_counter() - _perf_t1) * 1000
         cls._ref_map = ref_map
         cls._last_snapshot_time = now
         cls._last_snapshot_info = info
         cls._snapshot_url = current_url
 
         cls._last_som_b64 = ""
-        if ref_map and _is_som_enabled() and cls._llm_router:
+        _perf_som = 0.0
+        if with_som and ref_map and _is_som_enabled() and cls._llm_router:
             try:
                 import base64
+                _perf_t2 = time.perf_counter()
                 som_bytes = await asyncio.wait_for(
                     _screenshot_with_som(browser, ref_map),
                     timeout=8.0,
                 )
+                _perf_som = (time.perf_counter() - _perf_t2) * 1000
                 if som_bytes:
                     cls._last_som_b64 = f"data:image/jpeg;base64,{base64.b64encode(som_bytes).decode('utf-8')}"
-                    logger.debug(f"SoM 截图已生成 ({len(som_bytes)} bytes)")
+                    _perf_logger.debug(f"SoM screenshot {len(som_bytes)} bytes {_perf_som:.0f}ms")
             except asyncio.TimeoutError:
                 logger.info("SoM 截图超时(8s)，跳过")
             except Exception as e:
                 logger.debug(f"SoM 截图生成失败: {e}")
 
+        _perf_total = (time.perf_counter() - _perf_t0) * 1000
+        _perf_logger.debug(f"do_snapshot total={_perf_total:.0f}ms scan={_perf_scan:.0f}ms som={_perf_som:.0f}ms with_som={with_som}")
         return info, ref_map
 
 
@@ -3483,6 +3499,7 @@ async def _action_with_stale_recovery(browser, ref: str, action_fn, action_name:
     risk_level="low",
 )
 async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = True) -> SkillResult:
+    _click_t0 = time.perf_counter()
     if not _SharedBrowser.is_active():
         return _not_active_error()
 
@@ -3552,28 +3569,32 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
         new_url = browser._page.url
         url_changed = new_url != old_url
         
+        _wait_t0 = time.perf_counter()
         if url_changed:
             await browser.wait_for_page_ready(timeout=8)
             change_info = f"页面已跳转: {new_url}"
         else:
-            await browser.wait_for_page_ready(timeout=3)
+            try:
+                await browser._page.wait_for_load_state("networkidle", timeout=1500)
+            except Exception:
+                pass
             new_title = await browser._page.title()
             if new_title != old_title:
                 change_info = f"页面标题变化: {old_title} → {new_title}"
             else:
                 change_info = "页面内容可能已更新"
+        _perf_logger.debug(f"browser_click wait={( time.perf_counter()-_wait_t0)*1000:.0f}ms nav={url_changed}")
 
-        info, _ = await _SharedBrowser.do_snapshot(force=url_changed)
+        info, _ = await _SharedBrowser.do_snapshot(force=url_changed, with_som=url_changed)
         
-        # v2.0: 记录成功操作
         _SharedBrowser.record_action("click", r, change_info, True)
         
         rpa_tag = " 🖱️" if rpa_mode and RPAConfig.enabled else ""
         return SkillResult(success=True, data=f"✓ 已点击 {r}{rpa_tag}\n{change_info}\n\n{info}")
 
     result = await _action_with_stale_recovery(browser, ref, _do_click, "click")
+    _perf_logger.debug(f"browser_click total={( time.perf_counter()-_click_t0)*1000:.0f}ms ref={ref}")
     
-    # v2.0: 记录失败操作
     if not result.success:
         _SharedBrowser.record_action("click", ref, result.error[:100], False)
     
@@ -3603,6 +3624,7 @@ async def browser_click(ref: str, wait_after: float = None, rpa_mode: bool = Tru
     risk_level="low",
 )
 async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bool = True, rpa_mode: bool = True) -> SkillResult:
+    _type_total_t0 = time.perf_counter()
     if not _SharedBrowser.is_active():
         return _not_active_error()
 
@@ -3622,35 +3644,39 @@ async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bo
         except Exception as e:
             logger.debug(f"等待输入框可见超时: {e}")
 
-        # v3.0 RPA: 平滑移动 + 人类化输入（绕过反爬）
+        _type_t0 = time.perf_counter()
         if rpa_mode and RPAConfig.enabled:
-            # 1. 平滑移动鼠标到输入框
             await browser.rpa_move_mouse_to(locator)
-            
-            # 2. 点击聚焦
             await locator.click()
             await asyncio.sleep(0.05)
-            
-            # 3. 清空
             if clear:
                 await locator.fill("")
-            
-            # 4. 人类化逐字输入（随机延迟，绕过输入速度检测）
-            for char in text:
-                await locator.type(char, delay=0)
-                delay = _get_human_type_delay()
-                await asyncio.sleep(delay / 1000)
+
+            threshold = RPAConfig.fast_threshold
+            if len(text) > threshold:
+                prefix = text[:5]
+                for char in prefix:
+                    await locator.type(char, delay=0)
+                    await asyncio.sleep(_get_human_type_delay() / 1000)
+                await locator.evaluate(
+                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', {bubbles:true})); }",
+                    text,
+                )
+                _perf_logger.debug(f"browser_type fast_fill len={len(text)} prefix=5")
+            else:
+                for char in text:
+                    await locator.type(char, delay=0)
+                    await asyncio.sleep(_get_human_type_delay() / 1000)
         else:
-            # 非 RPA 模式：快速输入
             try:
                 await locator.focus()
                 await asyncio.sleep(0.1)
             except Exception:
                 pass
-
             if clear:
                 await locator.fill("")
             await locator.type(text, delay=30)
+        _perf_logger.debug(f"browser_type total={( time.perf_counter()-_type_t0)*1000:.0f}ms len={len(text)} rpa={rpa_mode and RPAConfig.enabled}")
 
         # v2.0: 验证输入是否成功
         try:
@@ -3668,9 +3694,12 @@ async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bo
             if url_changed:
                 await browser.wait_for_page_ready(timeout=8)
             else:
-                await browser.wait_for_page_ready(timeout=3)
+                try:
+                    await browser._page.wait_for_load_state("networkidle", timeout=1500)
+                except Exception:
+                    pass
 
-        info, _ = await _SharedBrowser.do_snapshot(force=press_enter)
+        info, _ = await _SharedBrowser.do_snapshot(force=press_enter, with_som=press_enter)
         
         result_msg = f"✓ 已输入: {text[:50]}{'...' if len(text) > 50 else ''}"
         if press_enter:
@@ -3678,7 +3707,9 @@ async def browser_type(ref: str, text: str, press_enter: bool = False, clear: bo
         
         return SkillResult(success=True, data=f"{result_msg}\n\n{info}")
 
-    return await _action_with_stale_recovery(browser, ref, _do_type, "type")
+    result = await _action_with_stale_recovery(browser, ref, _do_type, "type")
+    _perf_logger.debug(f"browser_type total={( time.perf_counter()-_type_total_t0)*1000:.0f}ms ref={ref} len={len(text)}")
+    return result
 
 
 @register(
@@ -3797,7 +3828,7 @@ async def browser_fill_form(fields: list[dict], submit_ref: str = "") -> SkillRe
             except Exception as e:
                 results.append(f"  提交点击失败: {_to_ai_friendly_error(e, submit_ref)}")
 
-        info, _ = await _SharedBrowser.do_snapshot(force=bool(submit_ref))
+        info, _ = await _SharedBrowser.do_snapshot(force=bool(submit_ref), with_som=bool(submit_ref))
         return SkillResult(success=True, data="表单填写结果:\n" + "\n".join(results) + f"\n\n{info}")
     except Exception as e:
         return SkillResult(success=False, error=f"表单填写失败: {e}")

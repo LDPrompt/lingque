@@ -143,7 +143,7 @@ class Agent:
         self,
         llm_router: LLMRouter,
         memory: Memory,
-        max_loops: int = 25,
+        max_loops: int = 30,
         require_confirmation: bool = True,
         agent_config=None,
     ):
@@ -913,8 +913,10 @@ class Agent:
                     reasoning_content=response.reasoning_content,
                 )
             )
+            from .memory import redact_secrets as _redact
             for tool_call, sr in tool_results:
                 content = str(sr)
+                content = _redact(content)
                 if self._max_tool_result_chars > 0 and len(content) > self._max_tool_result_chars:
                     content = content[:self._max_tool_result_chars] + f"\n... [结果已截断，原始 {len(content)} 字符]"
                 self.memory.add_message(
@@ -1014,7 +1016,7 @@ class Agent:
         return result
 
     async def _post_task_reflect(self, user_input: str, system_prompt: str) -> None:
-        """任务结束后自动反思：简单任务零 token，出错任务用 LLM 提取经验"""
+        """任务结束后自动反思：有工具调用就记录，出错任务用 LLM 提取经验"""
         try:
             le = _get_learning_engine()
             if le is None:
@@ -1022,7 +1024,7 @@ class Agent:
             rs = self._rs()
             tools_used = list(rs.tools_used_set)
 
-            if rs.total_tool_calls < 3 and rs.error_count == 0:
+            if rs.total_tool_calls == 0:
                 return
 
             task_summary = user_input[:150]
@@ -1088,8 +1090,8 @@ class Agent:
             except Exception as e:
                 logger.debug(f"知识图谱抽取跳过: {e}")
 
-        # 3) 自动记忆提取: 对实质性对话用 LLM 提取用户偏好/事实
-        if rs.total_tool_calls >= 3 and len(self.memory.messages) >= 6:
+        # 3) 自动记忆提取: 有实质内容的对话自动提取用户偏好/事实
+        if len(self.memory.messages) >= 4:
             try:
                 from ..memory.auto_extract import MemoryExtractor
                 extractor = MemoryExtractor(self.llm, self.memory.memory_dir)
@@ -1166,13 +1168,41 @@ class Agent:
         return await skill_registry.execute_raw(tool_call.name, tool_call.arguments)
 
     _DESTRUCTIVE_KEYWORDS = re.compile(
-        r'\b(rm|rmdir|del|unlink|shred|truncate)\b'
+        r'\b('
+        r'rm|rmdir|del|unlink|shred|truncate|'             # 删除
+        r'mv|rename|'                                       # 移动/重命名
+        r'chmod|chown|chgrp|'                               # 权限变更
+        r'kill|pkill|killall|'                              # 进程终止
+        r'systemctl|service|'                               # 服务管理
+        r'pip\s+install|pip3\s+install|npm\s+install|'      # 包安装
+        r'apt\s+install|apt-get\s+install|yum\s+install|'   # 系统包安装
+        r'docker\s+rm|docker\s+rmi|docker\s+stop|'          # 容器管理
+        r'git\s+push|git\s+reset|git\s+rebase|'             # Git 破坏性操作
+        r'curl\s+-X\s+(DELETE|PUT|POST|PATCH)|'             # HTTP 变更请求
+        r'wget\s+-O|curl\s+-o|'                             # 文件下载
+        r'reboot|shutdown|halt|poweroff|init\s+0|'          # 系统重启/关机
+        r'iptables|ufw|firewall-cmd|'                       # 防火墙
+        r'crontab|at\s+'                                    # 定时任务
+        r')\b',
+        re.IGNORECASE
+    )
+
+    _SAFE_RUN_COMMAND_PATTERNS = re.compile(
+        r'^\s*(pip\s+list|pip\s+show|pip3\s+list|pip3\s+show|'
+        r'docker\s+ps|docker\s+images|docker\s+logs|'
+        r'git\s+status|git\s+log|git\s+branch|git\s+diff|'
+        r'systemctl\s+status)\b',
+        re.IGNORECASE
     )
 
     def _is_destructive(self, tool_call: ToolCall) -> bool:
-        """只有真正破坏性的操作才需要用户确认，普通系统命令直接放行"""
+        """判断操作是否具有破坏性，查询类命令放行，变更类命令需确认"""
         if tool_call.name == "run_command":
             cmd = tool_call.arguments.get("command", "")
+            if self._SAFE_RUN_COMMAND_PATTERNS.search(cmd):
+                return False
+            if ">" in cmd or ">>" in cmd:
+                return True
             return bool(self._DESTRUCTIVE_KEYWORDS.search(cmd))
         return True
 

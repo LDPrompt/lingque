@@ -53,6 +53,7 @@ SENSITIVE_PATH_KEYWORDS = [
     "id_rsa", "id_ed25519", "authorized_keys",
     ".bash_history", ".zsh_history",
     "config.json", "secrets", "credentials",
+    ".credential_key", "credentials.enc",
     "api_key", "apikey", "secret_key", "access_token",
     "lingque.json", "token.json",
     "cookies/",

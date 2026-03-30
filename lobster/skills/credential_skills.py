@@ -1,49 +1,108 @@
 """
-凭证保险箱 — 安全存储 Skill 所需的 API Key / Token
+凭证保险箱 — Fernet 对称加密存储 Skill 所需的 API Key / Token
 
-存储位置: workspaces/credentials.json
-编码方式: 值做 base64 编码（非明文），防止日志/截图泄露
-运行时: 启动后自动注入 os.environ，技能可直接 os.getenv() 使用
+存储位置: workspaces/credentials.enc
+密钥文件: workspaces/.credential_key (自动生成，首次使用时创建)
+加密算法: Fernet (AES-128-CBC + HMAC-SHA256)
+运行时: 启动后自动解密并注入 os.environ，技能可直接 os.getenv() 使用
+向后兼容: 自动检测并迁移旧版 base64 格式 (credentials.json)
 """
 
 import base64
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 from .registry import register, SkillResult
 
 logger = logging.getLogger("lobster.skills.credentials")
 
-_CREDENTIALS_FILE = Path("workspaces/credentials.json")
+_CREDENTIALS_DIR = Path("workspaces")
+_CREDENTIALS_FILE = _CREDENTIALS_DIR / "credentials.enc"
+_KEY_FILE = _CREDENTIALS_DIR / ".credential_key"
+_LEGACY_FILE = _CREDENTIALS_DIR / "credentials.json"
 
 
-def _ensure_file() -> Path:
-    _CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not _CREDENTIALS_FILE.exists():
-        _CREDENTIALS_FILE.write_text("{}", encoding="utf-8")
-    return _CREDENTIALS_FILE
+def _ensure_dir():
+    _CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _get_or_create_key() -> bytes:
+    """获取或生成 Fernet 密钥（首次使用时自动创建）"""
+    _ensure_dir()
+    if _KEY_FILE.exists():
+        return _KEY_FILE.read_bytes().strip()
+
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key()
+    _KEY_FILE.write_bytes(key)
+
+    try:
+        if os.name != "nt":
+            os.chmod(_KEY_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    except OSError:
+        pass
+
+    logger.info("已生成凭证加密密钥")
+    return key
+
+
+def _get_fernet():
+    from cryptography.fernet import Fernet
+    return Fernet(_get_or_create_key())
 
 
 def _load_all() -> dict[str, str]:
-    f = _ensure_file()
-    try:
-        raw = json.loads(f.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    """加载并解密所有凭证"""
+    _migrate_legacy()
+
+    if not _CREDENTIALS_FILE.exists():
         return {}
-    result = {}
-    for k, v in raw.items():
-        try:
-            result[k] = base64.b64decode(v).decode("utf-8")
-        except Exception:
-            result[k] = v
-    return result
+
+    try:
+        f = _get_fernet()
+        encrypted = _CREDENTIALS_FILE.read_bytes()
+        decrypted = f.decrypt(encrypted)
+        return json.loads(decrypted.decode("utf-8"))
+    except Exception as e:
+        logger.error(f"凭证解密失败: {e}")
+        return {}
 
 
 def _save_all(data: dict[str, str]):
-    encoded = {k: base64.b64encode(v.encode("utf-8")).decode("ascii") for k, v in data.items()}
-    f = _ensure_file()
-    f.write_text(json.dumps(encoded, indent=2, ensure_ascii=False), encoding="utf-8")
+    """加密并保存所有凭证"""
+    _ensure_dir()
+    f = _get_fernet()
+    plaintext = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    encrypted = f.encrypt(plaintext)
+    _CREDENTIALS_FILE.write_bytes(encrypted)
+
+
+def _migrate_legacy():
+    """自动迁移旧版 base64 格式的 credentials.json"""
+    if not _LEGACY_FILE.exists() or _CREDENTIALS_FILE.exists():
+        return
+
+    try:
+        raw = json.loads(_LEGACY_FILE.read_text(encoding="utf-8"))
+        if not raw:
+            return
+
+        migrated = {}
+        for k, v in raw.items():
+            try:
+                migrated[k] = base64.b64decode(v).decode("utf-8")
+            except Exception:
+                migrated[k] = v
+
+        _save_all(migrated)
+
+        backup = _LEGACY_FILE.with_suffix(".json.bak")
+        _LEGACY_FILE.rename(backup)
+        logger.info(f"已迁移 {len(migrated)} 个凭证到加密存储，旧文件备份为 {backup.name}")
+    except Exception as e:
+        logger.warning(f"凭证迁移失败（旧文件保留）: {e}")
 
 
 def load_credentials_to_env():
@@ -63,7 +122,7 @@ def load_credentials_to_env():
 
 @register(
     name="save_credential",
-    description="保存 API Key / Token 到凭证保险箱（加密存储，自动注入环境变量）。用户提供密钥时必须用此工具保存，禁止写入 .env 或记忆。",
+    description="保存 API Key / Token 到凭证保险箱（Fernet 加密存储，自动注入环境变量）。用户提供密钥时必须用此工具保存，禁止写入 .env 或记忆。",
     parameters={
         "type": "object",
         "properties": {

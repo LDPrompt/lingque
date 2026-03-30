@@ -16,6 +16,8 @@ _allowed_paths: list[str] = []
 
 _SENSITIVE_PATH_KEYWORDS = (
     "credentials.json",
+    "credentials.enc",
+    ".credential_key",
     "cookies" + os.sep,
     ".chrome_profile" + os.sep,
 )

@@ -100,6 +100,14 @@ _BROWSER_GUIDE_FULL = """\
 5. **HTML 提取**: `browser_extract(selector)` / `browser_extract_table()` / `browser_extract_links()`
 6. **策略**: API 监听 → 翻页采集 → 相似元素 → 滚动采集 → HTML 提取
 
+### 效率优先：合批操作
+
+**重要**：浏览器操作可以在一轮中发多个工具调用，大幅减少等待：
+- **填写表单**：优先用 `browser_fill_form` 一次填完所有字段并提交，而不是逐个 `browser_type`
+- **连续操作**：输入后立即点搜索、填完后点提交——可以合成一轮：`browser_type` + `browser_click`
+- **批量判断**：页面结构已知且稳定时（比如表单页），不需要每步都等快照，直接连续操作
+- **避免逐字段**: 3 个以上输入框用 `browser_fill_form`，不要分 3 轮逐个 `browser_type`
+
 ### 元素操作稳定性
 - 元素编号会过期，但系统自动三层恢复：选择器直接命中 → 语义模糊匹配 → 位置匹配
 - DOM 变化时扩展主动通知，操作前自动刷新快照
